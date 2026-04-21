@@ -24,10 +24,10 @@ Roles:
 ──────────────────────────────────────────────────────────
 """
 
-import hashlib
 import io
 import json
 import uuid
+import bcrypt
 from datetime import date, datetime, time
 from pathlib import Path
 
@@ -58,14 +58,22 @@ except ImportError:
 # To add a user:  copy any line and change username, hash, role, and display name
 # To remove a user:  delete their entry
 
-def _h(pw: str) -> str:
-    return hashlib.sha256(pw.encode()).hexdigest()
+def _h(pw:str, rounds=8) -> str:
+    pwd = bcrypt.hashpw(pw.encode(), bcrypt.gensalt(rounds=8))
+    return pwd.decode()
+
+def _hcheck(pw:str, hash:str) -> bool :
+    return bcrypt.checkpw(pw.encode(), hash.encode())
+
+admin_hash = st.secrets["passwords"]["admin_hash"]
+engineer_hash = st.secrets["passwords"]["engineer_hash"]
+viewer_hash = st.secrets["passwords"]["viewer_hash"]
 
 USERS = {
     #  username       password hash           role           display name
-    "admin":    {"hash": _h("admin123"),    "role": "admin",     "name": "Administrator"},
-    "engineer": {"hash": _h("engineer1"),   "role": "readwrite", "name": "Site Engineer"},
-    "viewer":   {"hash": _h("viewer1"),     "role": "readonly",  "name": "Project Viewer"},
+    "admin":    {"hash": admin_hash,    "role": "admin",     "name": "Administrator"},
+    "engineer": {"hash": engineer_hash,   "role": "readwrite", "name": "Site Engineer"},
+    "viewer":   {"hash": viewer_hash,     "role": "readonly",  "name": "Project Viewer"},
 }
 
 # ── Role Permission Matrix ─────────────────────────────────────────────────────
@@ -945,7 +953,7 @@ if not st.session_state.authenticated:
             password = st.text_input("Password", type="password", placeholder="Enter your password")
             if st.button("Log In", type="primary", use_container_width=True):
                 user = USERS.get(username)
-                if user and user["hash"] == hashlib.sha256(password.encode()).hexdigest():
+                if _hcheck(password, user["hash"]) == True:
                     st.session_state.update({
                         "authenticated": True, "username": username,
                         "display_name": user["name"], "role": user["role"],
