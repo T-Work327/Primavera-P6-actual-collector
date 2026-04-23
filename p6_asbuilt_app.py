@@ -14,8 +14,10 @@ Edit the USERS dictionary below to add, remove, or change
 passwords and roles. Passwords are stored as SHA-256 hashes.
 
 To generate a hash for a new password, run in Python:
-    import hashlib
-    print(hashlib.sha256("yourpassword".encode()).hexdigest())
+    def _h(pw:str, rounds=8) -> str:
+        pwd = bcrypt.hashpw(pw.encode(), bcrypt.gensalt(rounds=8))
+        return pwd.decode()
+    then _h('new password')
 
 Roles:
   "readonly"   — View entries only
@@ -1220,10 +1222,17 @@ if "submit" in tab_index:
         col_id, col_wbs = st.columns(2)
         with col_id:
             activity_id_raw = st.text_input("Activity ID *", placeholder="e.g. A1000").strip()
-        with col_wbs:
-            wbs_input = st.text_input("WBS ID *", placeholder="e.g. 1.2.3").strip()
 
         existing = known_ids.get(activity_id_raw.upper()) if activity_id_raw else None
+
+        with col_wbs:
+            # Pre-fill WBS from stored entry when updating an existing activity
+            wbs_default = existing.get("wbs_id", "") if existing else ""
+            wbs_input = st.text_input(
+                "WBS ID *",
+                value=wbs_default,
+                placeholder="e.g. 1.2.3",
+            ).strip()
         if existing:
             st.info(
                 f"**Existing entry found:** {existing['activity_name']}  \n"
