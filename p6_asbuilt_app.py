@@ -14,10 +14,8 @@ Edit the USERS dictionary below to add, remove, or change
 passwords and roles. Passwords are stored as SHA-256 hashes.
 
 To generate a hash for a new password, run in Python:
-    def _h(pw:str, rounds=8) -> str:
-        pwd = bcrypt.hashpw(pw.encode(), bcrypt.gensalt(rounds=8))
-        return pwd.decode()
-    then _h('new password')
+    import hashlib
+    print(hashlib.sha256("yourpassword".encode()).hexdigest())
 
 Roles:
   "readonly"   — View entries only
@@ -29,6 +27,7 @@ Roles:
 import io
 import json
 import uuid
+import zipfile
 import bcrypt
 from datetime import date, datetime, time
 from pathlib import Path
@@ -209,9 +208,13 @@ def save_entries(entries: list[dict]) -> None:
     DATA_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def upsert_entry(entries: list[dict], new: dict) -> tuple:
+    """Scoped to project — same activity_id allowed across different projects."""
+    new_aid     = new.get("activity_id", "").upper()
+    new_project = get_project_from_wbs(new.get("wbs_id", ""))
     idx = next(
         (i for i, e in enumerate(entries)
-         if e.get("activity_id", "").upper() == new.get("activity_id", "").upper()),
+         if e.get("activity_id", "").upper() == new_aid
+         and get_project_from_wbs(e.get("wbs_id", "")) == new_project),
         None,
     )
     if idx is not None:
@@ -241,6 +244,67 @@ def is_exact_duplicate(incoming: dict, stored: dict) -> bool:
         if a != b:
             return False
     return True
+
+@st.cache_data(show_spinner=False)
+def build_photo_backup() -> bytes:
+    """
+    Build a ZIP of all image files plus the two JSON metadata files.
+    Returns bytes ready for st.download_button.
+    Cache cleared on upload/delete via build_photo_backup.clear().
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if PHOTO_FILE.exists():
+            zf.write(PHOTO_FILE, PHOTO_FILE.name)
+        if ASSIGN_FILE.exists():
+            zf.write(ASSIGN_FILE, ASSIGN_FILE.name)
+        if PHOTO_DIR.exists():
+            for img_path in PHOTO_DIR.iterdir():
+                if img_path.is_file():
+                    zf.write(img_path, f"{PHOTO_DIR.name}/{img_path.name}")
+    return buf.getvalue()
+
+
+def restore_photo_backup(zip_bytes: bytes) -> tuple[int, int, list[str]]:
+    """
+    Restore a photo library from a backup ZIP.
+    Extracts image files into PHOTO_DIR, overwrites the two JSON metadata files.
+    Returns (photos_restored, images_restored, warnings).
+    Existing files not in the backup are left untouched.
+    """
+    ensure_photo_dir()
+    warnings_list = []
+    photos_restored = images_restored = 0
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        names = zf.namelist()
+
+        # Restore metadata JSON files
+        for json_name, dest_path in [
+            (PHOTO_FILE.name,  PHOTO_FILE),
+            (ASSIGN_FILE.name, ASSIGN_FILE),
+        ]:
+            if json_name in names:
+                dest_path.write_bytes(zf.read(json_name))
+                if json_name == PHOTO_FILE.name:
+                    try:
+                        photos_restored = len(json.loads(zf.read(json_name)))
+                    except Exception:
+                        pass
+            else:
+                warnings_list.append(f"{json_name} not found in backup.")
+
+        # Restore image files
+        img_prefix = f"{PHOTO_DIR.name}/"
+        for name in names:
+            if name.startswith(img_prefix) and not name.endswith("/"):
+                img_filename = name[len(img_prefix):]
+                dest = PHOTO_DIR / img_filename
+                dest.write_bytes(zf.read(name))
+                images_restored += 1
+
+    return photos_restored, images_restored, warnings_list
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHOTO STORAGE
@@ -658,6 +722,41 @@ def strip_msp_wbs(wbs: str) -> str:
         return ""
     return ".".join(segments[:-1])
 
+def get_project_from_wbs(wbs: str) -> str:
+    """Extract the project name from a WBS code.
+    'ProjectA.1.2.3' -> 'ProjectA'
+    '1.2.3'          -> '(Unassigned)'
+    """
+    if not wbs:
+        return "(Unassigned)"
+    parts = wbs.strip().split(".", 1)
+    if len(parts) == 2 and not parts[0].isdigit():
+        return parts[0]
+    return "(Unassigned)"
+
+
+def get_all_projects(entries: list[dict]) -> list[str]:
+    """Return sorted unique project names from all entries."""
+    return sorted({get_project_from_wbs(e.get("wbs_id", "")) for e in entries})
+
+
+def filter_by_project(entries: list[dict], project: str) -> list[dict]:
+    """Filter entries to those belonging to the given project name."""
+    if not project or project == "— All Projects —":
+        return entries
+    return [e for e in entries if get_project_from_wbs(e.get("wbs_id", "")) == project]
+
+
+def make_wbs_with_project(project: str, numeric_wbs: str) -> str:
+    """Prepend project name to a numeric WBS. Avoids double-prefixing."""
+    if not project or project == "(Unassigned)":
+        return numeric_wbs.strip()
+    numeric = numeric_wbs.strip()
+    if numeric.startswith(project + "."):
+        return numeric
+    return f"{project}.{numeric}" if numeric else project
+
+
 def read_msp_excel(file_bytes: bytes) -> tuple:
     """
     Read a Microsoft Project XLSX export.
@@ -979,8 +1078,36 @@ with st.sidebar:
                                   "display_name": "", "role": ""})
         st.rerun()
     st.divider()
+
+    # ── Shared project selector ────────────────────────────────────────────
+    _all_entries_for_projects = load_entries()
+    _projects = ["— All Projects —"] + get_all_projects(_all_entries_for_projects)
+    if "selected_project" not in st.session_state:
+        st.session_state["selected_project"] = "— All Projects —"
+    # Keep selection valid if projects have changed
+    if st.session_state["selected_project"] not in _projects:
+        st.session_state["selected_project"] = "— All Projects —"
+
+    st.session_state["selected_project"] = st.selectbox(
+        "📁 Project",
+        options=_projects,
+        index=_projects.index(st.session_state["selected_project"]),
+        key="sidebar_project_select",
+    )
+    _sel_project = st.session_state["selected_project"]
+    st.divider()
     st.caption("Entries: p6_asbuilt_store.json")
     st.caption("Photos:  p6_images/")
+    st.divider()
+    if st.button("🔄  Refresh", use_container_width=True,
+                 help="Reload data from disk to see updates from other users."):
+        # Clear data caches so fresh data is loaded from disk
+        load_image_bytes.clear()
+        build_photo_backup.clear()
+        for _k in ("photo_list", "photo_map", "photo_assignments",
+                   "photo_to_aids", "aid_to_pids", "_assign_sig"):
+            st.session_state.pop(_k, None)
+        st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HEADER & DYNAMIC TABS
@@ -1009,10 +1136,14 @@ tab_index = {perm: tab_objs[i] for i, (_, perm) in enumerate(visible)}
 
 with tab_index["view"]:
     entries = load_entries()
-    st.subheader(f"All Entries ({len(entries)})")
+    _sel_project = st.session_state.get("selected_project", "— All Projects —")
+    entries = filter_by_project(entries, _sel_project)
+    _proj_label = f" — {_sel_project}" if _sel_project != "— All Projects —" else ""
+    st.subheader(f"All Entries ({len(entries)}){_proj_label}")
 
     if not entries:
-        st.info("No entries yet.")
+        st.info("No entries yet." if _sel_project == "— All Projects —"
+                else f"No entries for project '{_sel_project}'.")
     else:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total",       len(entries))
@@ -1096,11 +1227,17 @@ with tab_index["view"]:
         )
         st.divider()
 
-        # Build a lookup so we don't scan the list for every card
-        id_to_index = {e.get("activity_id", "").upper(): idx for idx, e in enumerate(entries)}
+        # Keyed by (activity_id, project) to support same IDs across projects
+        id_to_index = {
+            (e.get("activity_id","").upper(),
+             get_project_from_wbs(e.get("wbs_id",""))): idx
+            for idx, e in enumerate(entries)
+        }
 
         for entry in page_entries:
-            i     = id_to_index.get(entry.get("activity_id", "").upper(), 0)
+            i     = id_to_index.get(
+                (entry.get("activity_id","").upper(),
+                 get_project_from_wbs(entry.get("wbs_id",""))), 0)
             status    = entry.get("activity_status", "")
             act_id    = entry.get("activity_id", "")
             act_name  = entry.get("activity_name", "")
@@ -1217,22 +1354,67 @@ if "submit" in tab_index:
         known_ids = {e["activity_id"].upper(): e for e in entries}
 
         st.subheader("Submit or Update an Asbuilt Entry")
+
+        # ── Project selector ───────────────────────────────────────────────
+        _all_projects_submit = get_all_projects(entries)
+        _proj_options_submit = _all_projects_submit + ["＋ New project…"]
+        _sel_project = st.session_state.get("selected_project", "— All Projects —")
+        _default_proj = _sel_project if _sel_project in _all_projects_submit else (
+            _all_projects_submit[0] if _all_projects_submit else None
+        )
+        _proj_idx = _proj_options_submit.index(_default_proj) if _default_proj in _proj_options_submit else 0
+
+        if not _all_projects_submit:
+            st.info("No projects yet — enter a WBS below and one will be created automatically.")
+            submit_project = ""
+        else:
+            _proj_choice = st.selectbox(
+                "Project *",
+                options=_proj_options_submit,
+                index=_proj_idx,
+                key="submit_project_select",
+            )
+            if _proj_choice == "＋ New project…":
+                submit_project = st.text_input(
+                    "New project name",
+                    placeholder="e.g. ProjectB",
+                    key="submit_new_project_name",
+                ).strip()
+            else:
+                submit_project = _proj_choice
+
         st.caption("Enter the Activity ID — if it already exists the name is filled automatically.")
 
         col_id, col_wbs = st.columns(2)
         with col_id:
             activity_id_raw = st.text_input("Activity ID *", placeholder="e.g. A1000").strip()
 
-        existing = known_ids.get(activity_id_raw.upper()) if activity_id_raw else None
+        # Scope lookup to the selected project for accurate existing detection
+        _project_entries = filter_by_project(entries, submit_project) if submit_project else entries
+        _project_known   = {e["activity_id"].upper(): e for e in _project_entries}
+        existing = _project_known.get(activity_id_raw.upper()) if activity_id_raw else None
 
         with col_wbs:
-            # Pre-fill WBS from stored entry when updating an existing activity
-            wbs_default = existing.get("wbs_id", "") if existing else ""
-            wbs_input = st.text_input(
-                "WBS ID *",
-                value=wbs_default,
-                placeholder="e.g. 1.2.3",
-            ).strip()
+            if existing:
+                # Pre-fill from stored entry — show just the numeric part for clarity
+                _stored_numeric = strip_wbs_prefix(existing.get("wbs_id", ""))
+                wbs_numeric = st.text_input(
+                    "WBS (numeric part) *",
+                    value=_stored_numeric,
+                    placeholder="e.g. 1.2.3",
+                    key="submit_wbs_input",
+                ).strip()
+            else:
+                wbs_numeric = st.text_input(
+                    "WBS (numeric part) *",
+                    placeholder="e.g. 1.2.3",
+                    key="submit_wbs_input",
+                ).strip()
+
+        # Build full WBS with project prefix
+        wbs_input = make_wbs_with_project(submit_project, wbs_numeric) if wbs_numeric else ""
+        if wbs_input and submit_project and submit_project != "(Unassigned)":
+            st.caption(f"Full WBS will be stored as: **{wbs_input}**")
         if existing:
             st.info(
                 f"**Existing entry found:** {existing['activity_name']}  \n"
@@ -1369,7 +1551,13 @@ if "submit" in tab_index:
 if "import" in tab_index:
     with tab_index["import"]:
         entries   = load_entries()
-        known_ids = {e["activity_id"].upper(): e for e in entries}
+        _sel_project = st.session_state.get("selected_project", "— All Projects —")
+        # Scope matching to the selected project only
+        _entries_for_match = filter_by_project(entries, _sel_project)
+        known_ids = {e["activity_id"].upper(): e for e in _entries_for_match}
+
+        if _sel_project != "— All Projects —":
+            st.info(f"Importing into project: **{_sel_project}**", icon="📁")
 
         st.subheader("Import from Excel")
 
@@ -1408,7 +1596,7 @@ if "import" in tab_index:
             elif import_mode == "Microsoft Project Export":
                 # ── MSP matching flow ──────────────────────────────────────
                 st.divider()
-                matched_all, unmatched, duplicates = match_msp_to_stored(imported_rows, entries)
+                matched_all, unmatched, duplicates = match_msp_to_stored(imported_rows, _entries_for_match)
 
                 # Drop matched rows where the incoming data is identical to stored
                 matched          = [(r, s) for r, s in matched_all
@@ -1456,7 +1644,7 @@ if "import" in tab_index:
                 wbs_applied_offsets = {}  # suggestion_key → bool (applied)
 
                 if unmatched:
-                    offset_suggestions = detect_wbs_offset(unmatched, entries)
+                    offset_suggestions = detect_wbs_offset(unmatched, _entries_for_match)
 
                     # Deduplicate suggestions by (depth, delta, prefix, from_val)
                     # so we only show one prompt per unique shift
@@ -1742,8 +1930,11 @@ if "import" in tab_index:
                         disabled=(not _can_confirm or _blocked),
                     ):
                         entries       = load_entries()
-                        entries_index = {e.get("activity_id", "").upper(): idx
-                                         for idx, e in enumerate(entries)}
+                        entries_index = {
+                            (e.get("activity_id","").upper(),
+                             get_project_from_wbs(e.get("wbs_id",""))): idx
+                            for idx, e in enumerate(entries)
+                        }
                         updated = added = manually_updated = 0
 
                         # Helper: merge MSP progress into a stored entry in-place
@@ -1766,14 +1957,18 @@ if "import" in tab_index:
                         # Auto-matched updates
                         for aid, res in msp_resolutions.items():
                             if res["action"] == "overwrite":
-                                idx = entries_index.get(aid)
+                                _proj_res = get_project_from_wbs(
+                                    res["stored"].get("wbs_id",""))
+                                idx = entries_index.get((aid, _proj_res))
                                 if idx is not None:
                                     entries[idx] = _apply_msp(entries[idx], res["msp_row"])
                                     updated += 1
 
                         # Manual overwrites from unmatched rows
                         for row_idx, target_aid in manual_overwrites.items():
-                            idx = entries_index.get(target_aid.upper())
+                            _stored_m = known_ids.get(target_aid.upper(), {})
+                            _proj_m   = get_project_from_wbs(_stored_m.get("wbs_id",""))
+                            idx = entries_index.get((target_aid.upper(), _proj_m))
                             if idx is not None:
                                 entries[idx] = _apply_msp(entries[idx], unmatched[row_idx])
                                 manually_updated += 1
@@ -1896,13 +2091,17 @@ if "import" in tab_index:
                         row["_submitted_by"] = st.session_state.display_name
                         entries.append(row)
                         added += 1
-                    # Build index once before the loop — O(n) not O(n²)
-                    entries_index = {e.get("activity_id", "").upper(): idx
-                                     for idx, e in enumerate(entries)}
+                    # Build index once — keyed by (activity_id, project)
+                    entries_index = {
+                        (e.get("activity_id","").upper(),
+                         get_project_from_wbs(e.get("wbs_id",""))): idx
+                        for idx, e in enumerate(entries)
+                    }
                     for row in conflicts:
                         aid = row["activity_id"].upper()
                         if resolutions.get(aid) == "overwrite":
-                            idx = entries_index.get(aid, 0)
+                            _proj_r = get_project_from_wbs(row.get("wbs_id",""))
+                            idx = entries_index.get((aid, _proj_r), 0)
                             imp_str = row.pop("comments_import", "") or ""
                             comment_res = resolutions.get(f"comment_{aid}", "Keep existing only")
                             existing_comments = entries[idx].get("_comments", [])
@@ -1942,10 +2141,15 @@ if "export" in tab_index:
         st.write("- **Complete Type:** Always Physical as to not overide remaining durations with calulated values from percent complete")
         st.divider()
 
+        _sel_project = st.session_state.get("selected_project", "— All Projects —")
+        entries = filter_by_project(entries, _sel_project)
+        _proj_label = f" ({_sel_project})" if _sel_project != "— All Projects —" else ""
+
         if not entries:
-            st.warning("No entries to export yet.")
+            st.warning(f"No entries to export for project '{_sel_project}'." if _sel_project != "— All Projects —"
+                       else "No entries to export yet.")
         else:
-            st.info(f"{len(entries)} {'entry' if len(entries) == 1 else 'entries'} ready to export.")
+            st.info(f"{len(entries)} {'entry' if len(entries) == 1 else 'entries'} ready to export{_proj_label}.")
 
             # ── Project name / WBS prefix ─────────────────────────────────
             # Detect the current prefix from the first entry that has one
@@ -2109,6 +2313,7 @@ if "photos" in tab_index:
                 # Store the new photo id so Step 2 pre-selects it
                 st.session_state["last_uploaded_photo_id"] = record["id"]
                 load_image_bytes.clear()
+                build_photo_backup.clear()
                 for _k in ("photo_list","photo_map","photo_to_aids","aid_to_pids","_assign_sig"):
                     st.session_state.pop(_k, None)
                 st.rerun()
@@ -2189,14 +2394,106 @@ if "photos" in tab_index:
         # ── Gallery (all roles) ────────────────────────────────────────────
         st.subheader("Photo Gallery")
 
+        # Backup — available to all roles from any connected device
+        with st.expander("💾  Backup Photo Library"):
+            st.caption(
+                "Downloads a ZIP of all image files, photo metadata, and "
+                "assignment records. Use this to keep an off-device copy "
+                "or to migrate the library to another server."
+            )
+            _backup_bytes = build_photo_backup()
+            _backup_fname = f"p6_photo_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
+            st.download_button(
+                label="⬇️  Download Photo Backup",
+                data=_backup_bytes,
+                file_name=_backup_fname,
+                mime="application/zip",
+                use_container_width=True,
+            )
+            _n_photos = len(photos)
+            _size_mb  = round(len(_backup_bytes) / 1_048_576, 1)
+            st.caption(f"{_n_photos} photo{'s' if _n_photos != 1 else ''} · {_size_mb} MB")
+
+
+        # Restore — admin only
+        if has_permission("export"):
+            with st.expander("📂  Restore from Backup  (Admin only)"):
+                st.warning(
+                    "⚠️ Restoring will overwrite the current photo metadata and replace "
+                    "any image files that exist in the backup. "
+                    "Image files on the server that are **not** in the backup are kept. "
+                    "**Download a fresh backup first if you want to preserve the current state.**"
+                )
+                restore_file = st.file_uploader(
+                    "Upload backup ZIP",
+                    type=["zip"],
+                    key="photo_restore_upload",
+                )
+                if restore_file:
+                    zip_bytes = restore_file.read()
+                    # Preview contents
+                    try:
+                        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as _zf:
+                            _names    = _zf.namelist()
+                            _n_imgs   = sum(1 for n in _names
+                                            if n.startswith(f"{PHOTO_DIR.name}/")
+                                            and not n.endswith("/"))
+                            _has_log  = PHOTO_FILE.name  in _names
+                            _has_asgn = ASSIGN_FILE.name in _names
+                        st.write("**Backup contents:**")
+                        st.write(f"- Photo log JSON: {'✓' if _has_log  else '✗ missing'}")
+                        st.write(f"- Assignments JSON: {'✓' if _has_asgn else '✗ missing'}")
+                        st.write(f"- Image files: {_n_imgs}")
+                    except Exception as _e:
+                        st.error(f"Could not read ZIP: {_e}")
+                        zip_bytes = None
+
+                    if zip_bytes and st.button(
+                        "📂  Confirm Restore", type="primary", key="photo_restore_confirm"
+                    ):
+                        with st.spinner("Restoring…"):
+                            n_photos, n_imgs, restore_warns = restore_photo_backup(zip_bytes)
+                        for w in restore_warns:
+                            st.warning(w)
+                        # Invalidate all caches so restored data loads fresh
+                        load_image_bytes.clear()
+                        build_photo_backup.clear()
+                        for _k in ("photo_list", "photo_map", "photo_assignments",
+                                   "photo_to_aids", "aid_to_pids", "_assign_sig"):
+                            st.session_state.pop(_k, None)
+                        st.success(
+                            f"Restore complete — {n_photos} photo records, "
+                            f"{n_imgs} image files restored."
+                        )
+                        st.rerun()
+
+        st.divider()
+
         if not photos:
             st.info("No photos uploaded yet.")
         else:
             # Filter controls
-            f_col1, f_col2 = st.columns([2, 3])
+            _sel_project = st.session_state.get("selected_project", "— All Projects —")
+            f_col0, f_col1, f_col2 = st.columns([2, 2, 3])
+            with f_col0:
+                # Project filter — restricts which activity IDs are shown
+                _photo_projects = ["— All Projects —"] + get_all_projects(entries)
+                _photo_proj = st.selectbox(
+                    "Filter by Project",
+                    options=_photo_projects,
+                    index=_photo_projects.index(_sel_project) if _sel_project in _photo_projects else 0,
+                    key="photo_filter_project",
+                )
             with f_col1:
-                # Only show activity IDs that have at least one assignment
-                assigned_aids = sorted({a["activity_id"] for a in assignments})
+                # Only show activity IDs that have at least one assignment,
+                # filtered to the selected project
+                _project_aids = {
+                    e["activity_id"] for e in filter_by_project(entries, _photo_proj)
+                } if _photo_proj != "— All Projects —" else None
+                assigned_aids = sorted({
+                    a["activity_id"] for a in assignments
+                    if (_project_aids is None or a["activity_id"] in _project_aids)
+                })
                 filter_id = st.selectbox(
                     "Filter by Activity",
                     options=["— All —"] + assigned_aids,
@@ -2210,11 +2507,19 @@ if "photos" in tab_index:
                 ).strip().lower()
 
             # Apply filters
-            if filter_id != "— All —":
-                visible_pids = set(aid_to_pids.get(filter_id.upper(), []))
-                filtered = [p for p in photos if p["id"] in visible_pids]
+            if _photo_proj != "— All Projects —" and _project_aids is not None:
+                # Find all photo IDs assigned to any activity in this project
+                _proj_pids = {
+                    a["photo_id"] for a in assignments
+                    if a["activity_id"] in _project_aids
+                }
+                filtered = [p for p in photos if p["id"] in _proj_pids]
             else:
                 filtered = list(photos)
+
+            if filter_id != "— All —":
+                visible_pids = set(aid_to_pids.get(filter_id.upper(), []))
+                filtered = [p for p in filtered if p["id"] in visible_pids]
 
             if filter_text:
                 filtered = [p for p in filtered
