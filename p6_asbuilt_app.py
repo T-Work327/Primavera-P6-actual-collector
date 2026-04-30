@@ -81,7 +81,7 @@ USERS = {
 PERMISSIONS = {
     "readonly":  {"view"},
     "readwrite": {"view", "submit", "import", "photos"},
-    "admin":     {"view", "submit", "import", "export", "photos"},
+    "admin":     {"view", "submit", "import", "export", "photos", "settings"},
 }
 
 def has_permission(perm: str) -> bool:
@@ -414,36 +414,54 @@ def load_image_bytes(filename: str) -> bytes | None:
     path = PHOTO_DIR / filename
     return path.read_bytes() if path.exists() else None
 
-def assign_photo(photo_id: str, activity_ids: list[str], assigned_by: str) -> None:
-    """Add assignments for a photo to a list of activities (skip duplicates)."""
+def assign_photo(photo_id: str, activity_ids: list[str], assigned_by: str,
+                 entries: list | None = None) -> None:
+    """Add assignments for a photo to a list of activities (skip duplicates).
+    Stores wbs_id so photos resolve correctly when same activity_id exists
+    in multiple projects.
+    """
+    if entries is None:
+        entries = load_entries()
+    wbs_lookup = {e.get("activity_id","").upper(): e.get("wbs_id","") for e in entries}
     assignments = load_assignments()
-    existing    = {(a["photo_id"], a["activity_id"].upper()) for a in assignments}
+    existing    = {
+        (a["photo_id"], a["activity_id"].upper(),
+         get_project_from_wbs(a.get("wbs_id","")))
+        for a in assignments
+    }
     new_records = []
     for aid in activity_ids:
-        if (photo_id, aid.upper()) not in existing:
+        wbs     = wbs_lookup.get(aid.upper(), "")
+        project = get_project_from_wbs(wbs)
+        if (photo_id, aid.upper(), project) not in existing:
             new_records.append({
                 "photo_id":    photo_id,
                 "activity_id": aid,
+                "wbs_id":      wbs,
                 "assigned_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
                 "assigned_by": assigned_by,
             })
     if new_records:
         assignments.extend(new_records)
         save_assignments(assignments)
-        # Update session_state cache so gallery reflects change without full rerun
         if "photo_assignments" in st.session_state:
             st.session_state["photo_assignments"] = assignments
 
-def unassign_photo(photo_id: str, activity_id: str) -> None:
-    """Remove a single photo→activity assignment. Image file is kept."""
+def unassign_photo(photo_id: str, activity_id: str, wbs_id: str = "") -> None:
+    """Remove a single photo→activity assignment scoped to project.
+    If wbs_id is provided, only removes the assignment matching that project.
+    """
+    target_project = get_project_from_wbs(wbs_id) if wbs_id else None
     assignments = load_assignments()
-    updated = [
-        a for a in assignments
-        if not (a["photo_id"] == photo_id
-                and a["activity_id"].upper() == activity_id.upper())
-    ]
+    updated = []
+    for a in assignments:
+        if a["photo_id"] == photo_id and a["activity_id"].upper() == activity_id.upper():
+            if target_project is None:
+                continue
+            if get_project_from_wbs(a.get("wbs_id","")) == target_project:
+                continue
+        updated.append(a)
     save_assignments(updated)
-    # Update session_state cache so gallery reflects change without full rerun
     if "photo_assignments" in st.session_state:
         st.session_state["photo_assignments"] = updated
 
@@ -755,6 +773,39 @@ def make_wbs_with_project(project: str, numeric_wbs: str) -> str:
     if numeric.startswith(project + "."):
         return numeric
     return f"{project}.{numeric}" if numeric else project
+
+
+def rename_project(entries: list[dict], old_name: str, new_name: str) -> tuple[list[dict], int]:
+    """
+    Rename a project across all stored entries by replacing the WBS prefix,
+    and also updates wbs_id stored in photo assignment records to keep the
+    photo log in sync.
+    Returns (updated_entries, count_changed).
+    """
+    changed = 0
+    for entry in entries:
+        wbs = entry.get("wbs_id", "")
+        if not wbs:
+            continue
+        if get_project_from_wbs(wbs) == old_name:
+            numeric = strip_wbs_prefix(wbs)
+            entry["wbs_id"] = f"{new_name}.{numeric}" if numeric else new_name
+            changed += 1
+
+    # Update wbs_id in assignment records so photo→activity links stay in sync
+    assignments = load_assignments()
+    asgn_changed = 0
+    for a in assignments:
+        if get_project_from_wbs(a.get("wbs_id","")) == old_name:
+            numeric = strip_wbs_prefix(a.get("wbs_id",""))
+            a["wbs_id"] = f"{new_name}.{numeric}" if numeric else new_name
+            asgn_changed += 1
+    if asgn_changed:
+        save_assignments(assignments)
+        for _k in ("photo_assignments","photo_to_aids","aid_to_pids","_assign_sig"):
+            st.session_state.pop(_k, None)
+
+    return entries, changed
 
 
 def read_msp_excel(file_bytes: bytes) -> tuple:
@@ -1125,6 +1176,7 @@ TAB_DEFS = [
     ("📤  Import from Excel", "import"),
     ("📥  Export to Excel",   "export"),
     ("📸  Photo Log",         "photos"),
+    ("⚙️  Settings",          "settings"),
 ]
 visible   = [(lbl, perm) for lbl, perm in TAB_DEFS if has_permission(perm)]
 tab_objs  = st.tabs([lbl for lbl, _ in visible])
@@ -2004,13 +2056,31 @@ if "import" in tab_index:
                         st.rerun()
 
             else:
-                # ── P6 matching flow (existing logic) ─────────────────────
-                clean      = [r for r in imported_rows if r["activity_id"].upper() not in known_ids]
-                all_match  = [r for r in imported_rows if r["activity_id"].upper() in known_ids]
-                # Split conflicts into true changes vs exact duplicates
-                conflicts  = [r for r in all_match
-                              if not is_exact_duplicate(r, known_ids[r["activity_id"].upper()])]
+                # ── P6 matching flow — scoped to (activity_id, project) ────
+                def _row_key(r: dict) -> tuple:
+                    return (r["activity_id"].upper(),
+                            get_project_from_wbs(r.get("wbs_id", "")))
+
+                clean     = [r for r in imported_rows if _row_key(r) not in known_ids
+                             # known_ids is keyed by activity_id.upper() only (project-filtered)
+                             # re-check using full entries for cross-project safety
+                             ]
+
+                # Rebuild a full cross-project lookup keyed by (aid, project)
+                _all_entries     = load_entries()
+                _full_index      = {
+                    (e.get("activity_id","").upper(),
+                     get_project_from_wbs(e.get("wbs_id",""))): e
+                    for e in _all_entries
+                }
+                clean     = [r for r in imported_rows if _row_key(r) not in _full_index]
+                all_match = [r for r in imported_rows if _row_key(r) in _full_index]
+
+                # Split into genuine changes vs identical (skip silently)
+                conflicts = [r for r in all_match
+                             if not is_exact_duplicate(r, _full_index[_row_key(r)])]
                 duplicates_skipped = len(all_match) - len(conflicts)
+
                 msg = (
                     f"Found **{len(imported_rows)}** rows: **{len(clean)}** new, "
                     f"**{len(conflicts)}** conflict{'s' if len(conflicts) != 1 else ''}"
@@ -2019,15 +2089,19 @@ if "import" in tab_index:
                     msg += f", **{duplicates_skipped}** identical (skipped)"
                 st.success(msg)
 
+                # resolutions keyed by (aid, project) tuple to avoid cross-project clashes
                 resolutions = {}
                 if conflicts:
                     st.divider()
-                    st.subheader("⚠️ Conflicts — Activity ID already exists")
+                    st.subheader("⚠️ Conflicts — Activity ID + Project already exists")
                     st.caption("Review each conflict and choose an action before confirming the import.")
                     for row in conflicts:
+                        rkey     = _row_key(row)
                         aid      = row["activity_id"].upper()
-                        existing = known_ids[aid]
-                        label    = f"🔁  {row['activity_id']}  —  {row.get('activity_name', existing.get('activity_name', ''))}"
+                        project  = rkey[1]
+                        existing = _full_index[rkey]
+                        label    = (f"🔁  {row['activity_id']}  [{project}]  —  "
+                                    f"{row.get('activity_name', existing.get('activity_name', ''))}")
                         with st.expander(label, expanded=True):
                             fields = [
                                 ("Status",          "activity_status", False),
@@ -2037,7 +2111,6 @@ if "import" in tab_index:
                                 ("Remaining (days)", "remaining_dur",   False),
                                 ("WBS",              "wbs_id",          False),
                             ]
-                            # Existing stored comments summary
                             existing_comment_count = len(existing.get("_comments", []))
                             incoming_comment_str   = row.get("comments_import", "").strip()
                             c_cur, c_new = st.columns(2)
@@ -2054,28 +2127,33 @@ if "import" in tab_index:
                                     st.write(f"- **{lbl}:** {display_dt(val) if is_date else (val or '—')}")
                                 st.write(f"- **Comments (user_field_910):** {incoming_comment_str or '—'}")
 
+                            # Use a safe string key for st widgets (no special chars)
+                            widget_key = f"{aid}__{project}"
                             choice = st.radio(
                                 "Activity data", ["Overwrite with incoming", "Keep current"],
-                                key=f"conflict_{aid}", horizontal=True,
+                                key=f"conflict_{widget_key}", horizontal=True,
                             )
-                            resolutions[aid] = "overwrite" if choice == "Overwrite with incoming" else "skip"
+                            resolutions[rkey] = "overwrite" if choice == "Overwrite with incoming" else "skip"
 
-                            # Separate resolution for comments if both sides have data
                             if incoming_comment_str and existing_comment_count > 0:
                                 comment_choice = st.radio(
                                     "Comments",
-                                    ["Append imported comments to existing", "Keep existing only", "Replace with imported only"],
-                                    key=f"comment_conflict_{aid}", horizontal=True,
+                                    ["Append imported comments to existing",
+                                     "Keep existing only",
+                                     "Replace with imported only"],
+                                    key=f"comment_conflict_{widget_key}", horizontal=True,
                                 )
-                                resolutions[f"comment_{aid}"] = comment_choice
+                                resolutions[("comment",) + rkey] = comment_choice
                             elif incoming_comment_str:
-                                resolutions[f"comment_{aid}"] = "Append imported comments to existing"
+                                resolutions[("comment",) + rkey] = "Append imported comments to existing"
                             else:
-                                resolutions[f"comment_{aid}"] = "Keep existing only"
+                                resolutions[("comment",) + rkey] = "Keep existing only"
 
                 st.divider()
-                ow    = sum(1 for v in resolutions.values() if v == "overwrite")
-                sk    = sum(1 for v in resolutions.values() if v == "skip")
+                ow    = sum(1 for k, v in resolutions.items()
+                            if isinstance(k, tuple) and k[0] != "comment" and v == "overwrite")
+                sk    = sum(1 for k, v in resolutions.items()
+                            if isinstance(k, tuple) and k[0] != "comment" and v == "skip")
                 parts = [f"{len(clean)} new entries will be added"]
                 if ow: parts.append(f"{ow} existing entries will be overwritten")
                 if sk: parts.append(f"{sk} conflicts will be skipped")
@@ -2084,40 +2162,42 @@ if "import" in tab_index:
                 if st.button("✅  Confirm Import", type="primary"):
                     entries = load_entries()
                     added = overwritten = skipped = 0
+
                     for row in clean:
-                        # Convert any imported comment string to structured list
                         imp_str = row.pop("comments_import", "") or ""
-                        row["_comments"] = import_string_to_comments(imp_str, st.session_state.display_name)
+                        row["_comments"]     = import_string_to_comments(imp_str, st.session_state.display_name)
                         row["_submitted_by"] = st.session_state.display_name
                         entries.append(row)
                         added += 1
-                    # Build index once — keyed by (activity_id, project)
+
+                    # Build full (aid, project) index after appending new rows
                     entries_index = {
                         (e.get("activity_id","").upper(),
                          get_project_from_wbs(e.get("wbs_id",""))): idx
                         for idx, e in enumerate(entries)
                     }
+
                     for row in conflicts:
-                        aid = row["activity_id"].upper()
-                        if resolutions.get(aid) == "overwrite":
-                            _proj_r = get_project_from_wbs(row.get("wbs_id",""))
-                            idx = entries_index.get((aid, _proj_r), 0)
-                            imp_str = row.pop("comments_import", "") or ""
-                            comment_res = resolutions.get(f"comment_{aid}", "Keep existing only")
-                            existing_comments = entries[idx].get("_comments", [])
-                            imported_comments = import_string_to_comments(imp_str, st.session_state.display_name)
-                            if comment_res == "Append imported comments to existing":
-                                # Imported go after existing (existing are newer)
-                                row["_comments"] = existing_comments + imported_comments
-                            elif comment_res == "Replace with imported only":
-                                row["_comments"] = imported_comments
-                            else:
-                                row["_comments"] = existing_comments
-                            row["_submitted_by"] = st.session_state.display_name
-                            entries[idx] = row
-                            overwritten += 1
+                        rkey = _row_key(row)
+                        if resolutions.get(rkey) == "overwrite":
+                            idx = entries_index.get(rkey)
+                            if idx is not None:
+                                imp_str      = row.pop("comments_import", "") or ""
+                                comment_res  = resolutions.get(("comment",) + rkey, "Keep existing only")
+                                stored_cmts  = entries[idx].get("_comments", [])
+                                imported_cmts = import_string_to_comments(imp_str, st.session_state.display_name)
+                                if comment_res == "Append imported comments to existing":
+                                    row["_comments"] = stored_cmts + imported_cmts
+                                elif comment_res == "Replace with imported only":
+                                    row["_comments"] = imported_cmts
+                                else:
+                                    row["_comments"] = stored_cmts
+                                row["_submitted_by"] = st.session_state.display_name
+                                entries[idx] = row
+                                overwritten += 1
                         else:
                             skipped += 1
+
                     save_entries(entries)
                     msg = f"Import complete: **{added}** added"
                     if overwritten: msg += f", **{overwritten}** overwritten"
@@ -2227,7 +2307,12 @@ if "photos" in tab_index:
         ensure_photo_dir()
         entries           = load_entries()
         known_ids_ordered = [e["activity_id"] for e in entries]
-        known_map         = {e["activity_id"].upper(): e for e in entries}
+        # Keyed by (activity_id.upper(), project) to disambiguate same IDs across projects
+        known_map = {
+            (e["activity_id"].upper(),
+             get_project_from_wbs(e.get("wbs_id",""))): e
+            for e in entries
+        }
         can_upload        = has_permission("photos")
 
         # ── Cache photos list and all lookups in session_state ─────────────
@@ -2252,8 +2337,10 @@ if "photos" in tab_index:
                 or "photo_to_aids" not in st.session_state):
             _pta, _atp, _pm = {}, {}, {}
             for a in assignments:
-                _pta.setdefault(a["photo_id"], []).append(a["activity_id"])
-                _atp.setdefault(a["activity_id"].upper(), []).append(a["photo_id"])
+                _proj_a  = get_project_from_wbs(a.get("wbs_id",""))
+                _aid_key = (a["activity_id"].upper(), _proj_a)
+                _pta.setdefault(a["photo_id"], []).append(_aid_key)
+                _atp.setdefault(_aid_key, []).append(a["photo_id"])
             for p in photos:
                 _pm[p["id"]] = p
             st.session_state["photo_to_aids"] = _pta
@@ -2362,27 +2449,40 @@ if "photos" in tab_index:
                     st.image(_thumb_bytes, width=200)
 
                 # Current assignments for this photo
-                current_aids = set(a.upper() for a in photo_to_aids.get(selected_photo_id, []))
+                # photo_to_aids stores (aid.upper(), project) tuples
+                current_aids = set(photo_to_aids.get(selected_photo_id, []))
 
                 # Multi-select for activities
                 assign_ids = st.multiselect(
                     "Assign to activities",
                     options=known_ids_ordered,
-                    default=[aid for aid in known_ids_ordered if aid.upper() in current_aids],
-                    format_func=lambda aid: f"{aid}  —  {known_map[aid.upper()]['activity_name']}",
+                    default=[aid for aid in known_ids_ordered
+                             if any(t[0] == aid.upper() for t in current_aids)],
+                    format_func=lambda aid: (
+                        known_map.get(
+                            (aid.upper(), get_project_from_wbs(
+                                next((e.get("wbs_id","") for e in entries
+                                      if e["activity_id"].upper() == aid.upper()), "")
+                            )), {}
+                        ).get("activity_name", aid)
+                    ),
                     key="assign_activity_select",
                 )
 
                 if st.button("💾  Save Assignments", type="primary"):
                     # Add new assignments
-                    new_aids = [aid for aid in assign_ids if aid.upper() not in current_aids]
+                    new_aids = [aid for aid in assign_ids
+                               if not any(t[0] == aid.upper() for t in current_aids)]
                     if new_aids:
-                        assign_photo(selected_photo_id, new_aids, st.session_state.display_name)
-                    # Remove deselected assignments
+                        assign_photo(selected_photo_id, new_aids,
+                                     st.session_state.display_name, entries)
                     removed_aids = [aid for aid in known_ids_ordered
-                                    if aid.upper() in current_aids and aid not in assign_ids]
+                                    if any(t[0] == aid.upper() for t in current_aids)
+                                    and aid not in assign_ids]
                     for aid in removed_aids:
-                        unassign_photo(selected_photo_id, aid)
+                        _rm_wbs = next((e.get("wbs_id","") for e in entries
+                                        if e["activity_id"].upper() == aid.upper()), "")
+                        unassign_photo(selected_photo_id, aid, _rm_wbs)
                     # session_state updated inside assign/unassign — no rerun needed
                     st.success(
                         f"Assignments saved — "
@@ -2512,13 +2612,18 @@ if "photos" in tab_index:
                 _proj_pids = {
                     a["photo_id"] for a in assignments
                     if a["activity_id"] in _project_aids
+                    and get_project_from_wbs(a.get("wbs_id","")) == _photo_proj
                 }
                 filtered = [p for p in photos if p["id"] in _proj_pids]
             else:
                 filtered = list(photos)
 
             if filter_id != "— All —":
-                visible_pids = set(aid_to_pids.get(filter_id.upper(), []))
+                _filt_entry = next(
+                    (e for e in entries if e["activity_id"].upper() == filter_id.upper()), {}
+                )
+                _filt_proj   = get_project_from_wbs(_filt_entry.get("wbs_id",""))
+                visible_pids = set(aid_to_pids.get((filter_id.upper(), _filt_proj), []))
                 filtered = [p for p in filtered if p["id"] in visible_pids]
 
             if filter_text:
@@ -2575,11 +2680,17 @@ if "photos" in tab_index:
                                     st.caption(photo["comment"])
 
                                 # Assigned activities
-                                aids = photo_to_aids.get(photo["id"], [])
+                                aids = photo_to_aids.get(photo["id"], [])  # list of (aid, project) tuples
                                 if aids:
-                                    for aid in aids:
-                                        act = known_map.get(aid.upper(), {})
-                                        st.caption(f"📌 {aid} — {act.get('activity_name','')} ({act.get('activity_status','')})")
+                                    for aid_key in aids:
+                                        act      = known_map.get(aid_key, {})
+                                        aid_str  = aid_key[0] if isinstance(aid_key, tuple) else aid_key
+                                        proj_str = aid_key[1] if isinstance(aid_key, tuple) else ""
+                                        st.caption(
+                                            f"📌 {aid_str}"
+                                            + (f" [{proj_str}]" if proj_str and proj_str != "(Unassigned)" else "")
+                                            + f" — {act.get('activity_name','')} ({act.get('activity_status','')})"
+                                        )
                                 else:
                                     st.caption("Not assigned")
 
@@ -2587,26 +2698,39 @@ if "photos" in tab_index:
 
                                 if can_upload:
                                     with st.expander("✏️ Assign / Remove / Delete"):
+                                        _assigned_aids = {t[0] for t in aids} if aids and isinstance(aids[0], tuple) else {a.upper() for a in aids}
                                         new_assign = st.multiselect(
                                             "Assign to:",
                                             options=[a for a in known_ids_ordered
-                                                     if a.upper() not in {x.upper() for x in aids}],
-                                            format_func=lambda a: f"{a} — {known_map[a.upper()]['activity_name']}",
+                                                     if a.upper() not in _assigned_aids],
+                                            format_func=lambda a: (
+                                                known_map.get(
+                                                    (a.upper(), get_project_from_wbs(
+                                                        next((e.get("wbs_id","") for e in entries
+                                                              if e["activity_id"].upper() == a.upper()), "")
+                                                    )), {}
+                                                ).get("activity_name", a)
+                                            ),
                                             key=f"gallery_assign_{photo['id']}",
                                         )
                                         if st.button("＋ Assign", key=f"gallery_assign_btn_{photo['id']}",
                                                      disabled=not new_assign):
-                                            assign_photo(photo["id"], new_assign, st.session_state.display_name)
-                                            st.session_state["_assign_sig"] = None  # force lookup rebuild
+                                            assign_photo(photo["id"], new_assign,
+                                                         st.session_state.display_name, entries)
+                                            st.session_state["_assign_sig"] = None
                                             st.toast(f"Assigned to {len(new_assign)} activity/activities.")
 
                                         if aids:
-                                            for aid in aids:
-                                                if st.button(f"Remove from {aid}",
-                                                             key=f"unassign_{photo['id']}_{aid}"):
-                                                    unassign_photo(photo["id"], aid)
-                                                    st.session_state["_assign_sig"] = None  # force lookup rebuild
-                                                    st.toast(f"Removed from {aid}.")
+                                            for aid_key in aids:
+                                                aid_str  = aid_key[0] if isinstance(aid_key, tuple) else aid_key
+                                                aid_wbs  = next((e.get("wbs_id","") for e in entries
+                                                                 if e["activity_id"].upper() == aid_str), "")
+                                                proj_str = aid_key[1] if isinstance(aid_key, tuple) and aid_key[1] not in ("","(Unassigned)") else ""
+                                                btn_lbl  = f"Remove from {aid_str}" + (f" [{proj_str}]" if proj_str else "")
+                                                if st.button(btn_lbl, key=f"unassign_{photo['id']}_{aid_str}_{proj_str}"):
+                                                    unassign_photo(photo["id"], aid_str, aid_wbs)
+                                                    st.session_state["_assign_sig"] = None
+                                                    st.toast(f"Removed from {aid_str}.")
 
                                         if st.button("🗑 Delete permanently",
                                                      key=f"photo_del_{photo['id']}", type="primary"):
@@ -2616,3 +2740,102 @@ if "photos" in tab_index:
                                                        "photo_to_aids","aid_to_pids","_assign_sig"):
                                                 st.session_state.pop(_k, None)
                                             st.rerun()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: SETTINGS  (Admin only)
+# ══════════════════════════════════════════════════════════════════════════════
+
+if "settings" in tab_index:
+    with tab_index["settings"]:
+        st.subheader("⚙️ Settings")
+        st.caption("Admin-only configuration options.")
+
+        # ── Rename Project ────────────────────────────────────────────────
+        st.markdown("### Rename Project")
+        st.write(
+            "Renames a project by rewriting the WBS prefix on every activity "
+            "that belongs to it. The new name must exactly match the project "
+            "name in Primavera P6 if you intend to export and re-import."
+        )
+
+        _settings_entries = load_entries()
+        _settings_projects = get_all_projects(_settings_entries)
+        _named_projects = [p for p in _settings_projects if p != "(Unassigned)"]
+
+        if not _named_projects:
+            st.info("No named projects found. Projects are identified by the "
+                    "non-numeric prefix of WBS codes (e.g. 'ProjectA' in 'ProjectA.1.2.3').")
+        else:
+            rn_col1, rn_col2 = st.columns(2)
+            with rn_col1:
+                old_proj = st.selectbox(
+                    "Project to rename",
+                    options=_named_projects,
+                    key="settings_rename_old",
+                )
+            with rn_col2:
+                new_proj = st.text_input(
+                    "New project name",
+                    placeholder="e.g. ProjectB",
+                    key="settings_rename_new",
+                ).strip()
+
+            # Count affected entries
+            _affected = [e for e in _settings_entries
+                         if get_project_from_wbs(e.get("wbs_id","")) == old_proj]
+
+            if new_proj:
+                if new_proj == old_proj:
+                    st.warning("New name is the same as the current name.")
+                elif new_proj in _named_projects:
+                    st.error(
+                        f"A project named **{new_proj}** already exists. "
+                        "Renaming into an existing project would merge them — "
+                        "if that is intentional, confirm below."
+                    )
+                    if st.button(
+                        f"⚠️  Merge {old_proj} into {new_proj} ({len(_affected)} activities)",
+                        type="primary",
+                        key="settings_rename_confirm_merge",
+                    ):
+                        _settings_entries, n = rename_project(_settings_entries, old_proj, new_proj)
+                        save_entries(_settings_entries)
+                        # Update sidebar project selection if it was pointing at old name
+                        if st.session_state.get("selected_project") == old_proj:
+                            st.session_state["selected_project"] = new_proj
+                        st.success(f"Merged **{old_proj}** into **{new_proj}** — {n} activities updated.")
+                        st.rerun()
+                else:
+                    st.info(
+                        f"**{len(_affected)}** {'activity' if len(_affected) == 1 else 'activities'} "
+                        f"will be renamed from **{old_proj}** to **{new_proj}**."
+                    )
+                    # Preview first 5
+                    if _affected:
+                        with st.expander("Preview affected activities"):
+                            for e in _affected[:10]:
+                                old_wbs = e.get("wbs_id","")
+                                numeric = strip_wbs_prefix(old_wbs)
+                                new_wbs = f"{new_proj}.{numeric}" if numeric else new_proj
+                                st.caption(
+                                    f"`{e['activity_id']}`  {e['activity_name']}  "
+                                    f"{old_wbs} → {new_wbs}"
+                                )
+                            if len(_affected) > 10:
+                                st.caption(f"… and {len(_affected) - 10} more")
+
+                    if st.button(
+                        f"✅  Rename {old_proj} → {new_proj}",
+                        type="primary",
+                        key="settings_rename_confirm",
+                    ):
+                        _settings_entries, n = rename_project(_settings_entries, old_proj, new_proj)
+                        save_entries(_settings_entries)
+                        # Update sidebar selection if it was pointing at the old name
+                        if st.session_state.get("selected_project") == old_proj:
+                            st.session_state["selected_project"] = new_proj
+                        st.success(
+                            f"Renamed **{old_proj}** → **{new_proj}** — "
+                            f"{n} {'activity' if n == 1 else 'activities'} updated."
+                        )
+                        st.rerun()
