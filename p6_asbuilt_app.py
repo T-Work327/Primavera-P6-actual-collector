@@ -1508,7 +1508,7 @@ if "submit" in tab_index:
             with col_p:
                 pct_complete = st.number_input(
                     "Duration % Complete *", min_value=0, max_value=99, step=5,
-                    value=int(existing.get("pct_complete" or 0)) if existing else 0,
+                    value=int(existing.get("pct_complete" )or 0) if existing else 0,
                 )
             with col_r:
                 remaining_dur = st.text_input(
