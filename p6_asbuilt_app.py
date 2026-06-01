@@ -18,9 +18,10 @@ To generate a hash for a new password, run in Python:
     print(hashlib.sha256("yourpassword".encode()).hexdigest())
 
 Roles:
-  "readonly"   — View entries only
-  "readwrite"  — View + Submit/Update + Import from Excel + Photo Log
-  "admin"      — All of the above + Export to Excel
+  viewer    — View entries only
+  engineer  — View + Submit + Import + Photos + Site Walk
+  admin     — All engineer permissions + Export + Settings
+  developer — All admin permissions + Manage Users
 ──────────────────────────────────────────────────────────
 """
 
@@ -49,39 +50,58 @@ except ImportError:
     st.stop()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# USER DEFINITIONS  —  edit this section to manage users
+# USER DEFINITIONS
 # ══════════════════════════════════════════════════════════════════════════════
 #
-# To change a password:
-#   1. Run in Python:  import hashlib; print(hashlib.sha256("newpassword".encode()).hexdigest())
-#   2. Replace the hash string below
+# Roles:
+#   viewer    — Read only
+#   engineer  — View + Submit + Import + Photos + Site Walk
+#   admin     — All engineer permissions + Export + Settings + Notifications
+#   developer — All admin permissions + Manage Users (project assignment)
 #
-# To add a user:  copy any line and change username, hash, role, and display name
-# To remove a user:  delete their entry
+# Passwords are stored as bcrypt hashes in .streamlit/secrets.toml:
+#   [passwords]
+#   admin_hash      = "$2b$08$..."
+#   admin2_hash     = "$2b$08$..."
+#   engineer_hash   = "$2b$08$..."
+#   engineer2_hash  = "$2b$08$..."
+#   viewer_hash     = "$2b$08$..."
+#   developer_hash  = "$2b$08$..."
+#
+# To generate a hash:
+#   import bcrypt
+#   print(bcrypt.hashpw("yourpassword".encode(), bcrypt.gensalt(rounds=8)).decode())
 
-def _h(pw:str, rounds=8) -> str:
-    pwd = bcrypt.hashpw(pw.encode(), bcrypt.gensalt(rounds=8))
-    return pwd.decode()
+def _h(pw: str, rounds: int = 8) -> str:
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt(rounds=rounds)).decode()
 
-def _hcheck(pw:str, hash:str) -> bool :
-    return bcrypt.checkpw(pw.encode(), hash.encode())
+def _hcheck(pw: str, hsh: str) -> bool:
+    return bcrypt.checkpw(pw.encode(), hsh.encode())
 
-admin_hash = st.secrets["passwords"]["admin_hash"]
-engineer_hash = st.secrets["passwords"]["engineer_hash"]
-viewer_hash = st.secrets["passwords"]["viewer_hash"]
+# Load hashes from secrets
+_pw = st.secrets["passwords"]
 
 USERS = {
-    #  username       password hash           role           display name
-    "admin":    {"hash": admin_hash,    "role": "admin",     "name": "Administrator"},
-    "engineer": {"hash": engineer_hash,   "role": "readwrite", "name": "Site Engineer"},
-    "viewer":   {"hash": viewer_hash,     "role": "readonly",  "name": "Project Viewer"},
+    #  username        hash                          role          display name
+    "admin":      {"hash": _pw["admin_hash"],      "role": "admin",     "name": "Administrator"},
+    "admin2":     {"hash": _pw["admin2_hash"],     "role": "admin",     "name": "Administrator 2"},
+    "engineer":   {"hash": _pw["engineer_hash"],   "role": "engineer",  "name": "Site Engineer"},
+    "engineer2":  {"hash": _pw["engineer2_hash"],  "role": "engineer",  "name": "Site Engineer 2"},
+    "viewer":     {"hash": _pw["viewer_hash"],     "role": "viewer",    "name": "Project Viewer"},
+    "developer":  {"hash": _pw["developer_hash"],  "role": "developer", "name": "Developer"},
 }
 
 # ── Role Permission Matrix ─────────────────────────────────────────────────────
+# Each role name maps directly to a set of permission keys.
+# To change what a role can do, edit its set here — all users with that role
+# are updated instantly without touching individual user records.
 PERMISSIONS = {
-    "readonly":  {"view"},
-    "readwrite": {"view", "submit", "import", "photos"},
-    "admin":     {"view", "submit", "import", "export", "photos", "settings"},
+    "viewer":    {"view"},
+    "engineer":  {"view", "submit", "import", "photos", "sitewalk"},
+    "admin":     {"view", "submit", "import", "export", "photos",
+                  "settings", "sitewalk"},
+    "developer": {"view", "submit", "import", "export", "photos",
+                  "settings", "sitewalk", "manage_users"},
 }
 
 def has_permission(perm: str) -> bool:
@@ -94,7 +114,10 @@ def has_permission(perm: str) -> bool:
 DATA_FILE  = Path("p6_asbuilt_store.json")
 PHOTO_DIR  = Path("p6_images")
 PHOTO_FILE   = Path("p6_photo_log.json")
-ASSIGN_FILE  = Path("p6_photo_assignments.json")
+ASSIGN_FILE   = Path("p6_photo_assignments.json")
+PROJ_SETTINGS  = Path("p6_project_settings.json")
+NOTIF_FILE     = Path("p6_notifications.json")
+TAB_VIS_FILE   = Path("p6_tab_visibility.json")
 
 USER_DATA = "DurationQtyType=QT_Day\nShowAsPercentage=0\nSmallScaleQtyType=QT_Hour\nDateFormat=dd/mm/yyyy\nCurrencyFormat=US Dollar"
 
@@ -107,16 +130,17 @@ STATUS_COLOUR = {
 }
 
 ROLE_LABEL = {
-    "readonly":  "Read Only",
-    "readwrite": "Read / Write",
+    "viewer":    "Viewer",
+    "engineer":  "Engineer",
     "admin":     "Admin",
+    "developer": "Developer",
 }
 
 # P6 internal field key names (row 1 of TASK sheet)
 P6_FIELD_KEYS = [
     "task_code", "task_name", "status_code", "act_start_date",
     "act_end_date", "complete_pct", "remain_drtn_hr_cnt",
-    "complete_pct_type", "wbs_id", "user_field_910",
+    "complete_pct_type", "wbs_id", "user_field_813", "start_date", "task_type",
 ]
 
 # Column definitions: (display header, column width, data key)
@@ -131,9 +155,11 @@ P6_COLUMNS = [
     ("Percent Complete Type",20, "complete_pct_type"),
     ("WBS Code",             36, "wbs_id"),
     ("Comments",             50, "comments_export"),
+    ("Predicted Start",      20, "predicted_start"),
+    ("Task Type",            20, "task_type"),
 ]
 
-DATE_KEYS = {"actual_start", "actual_finish"}
+DATE_KEYS = {"actual_start", "actual_finish", "predicted_start"}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DATE HELPERS
@@ -192,6 +218,14 @@ def import_string_to_comments(raw: str, imported_by: str) -> list[dict]:
     return [{"text": seg, "by": f"{imported_by} (imported)", "at": ts}
             for seg in segments]
 
+def merge_imported_comments(imported: list[dict],
+                             existing: list[dict]) -> list[dict]:
+    """Return only imported comments whose text is not already in existing."""
+    existing_texts = {c.get("text","").strip().lower() for c in existing}
+    return [c for c in imported
+            if c.get("text","").strip().lower() not in existing_texts]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # STORAGE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -232,7 +266,7 @@ def upsert_entry(entries: list[dict], new: dict) -> tuple:
 # are intentionally excluded — we only care about progress data changing.
 _PROGRESS_FIELDS = (
     "activity_status", "actual_start", "actual_finish",
-    "pct_complete", "remaining_dur",
+    "pct_complete", "remaining_dur", "predicted_start", "task_type",
 )
 
 def is_exact_duplicate(incoming: dict, stored: dict) -> bool:
@@ -595,7 +629,9 @@ P6_KEY_MAP = {
     "status_code": "activity_status", "act_start_date": "actual_start",
     "act_end_date": "actual_finish", "complete_pct": "pct_complete",
     "remain_drtn_hr_cnt": "remaining_dur", "complete_pct_type": "complete_pct_type",
-    "wbs_id": "wbs_id", "user_field_910": "comments_import",
+    "wbs_id": "wbs_id", "user_field_813": "comments_import",
+    "start_date": "predicted_start",
+    "task_type": "task_type",
 }
 HEADER_KEY_MAP = {
     "activity id": "activity_id", "activity name": "activity_name",
@@ -603,6 +639,8 @@ HEADER_KEY_MAP = {
     "actual finish": "actual_finish", "duration % complete": "pct_complete",
     "remaining duration": "remaining_dur", "percent complete type": "complete_pct_type",
     "wbs code": "wbs_id", "comments": "comments_import",
+    "predicted start": "predicted_start",
+    "task type": "task_type",
 }
 
 def read_p6_excel(file_bytes: bytes) -> tuple:
@@ -649,7 +687,7 @@ def read_p6_excel(file_bytes: bytes) -> tuple:
             "activity_id": "", "activity_name": "", "activity_status": "",
             "actual_start": "", "actual_finish": "", "pct_complete": "",
             "remaining_dur": "", "complete_pct_type": "Physical", "wbs_id": "",
-            "comments_import": "",
+            "comments_import": "", "predicted_start": "", "task_type": "",
         }
         for col_idx, data_key in col_map.items():
             if col_idx >= len(row):
@@ -663,6 +701,18 @@ def read_p6_excel(file_bytes: bytes) -> tuple:
                     entry[data_key] = str(int(float(vs))) if vs else ""
                 except ValueError:
                     entry[data_key] = vs
+            elif data_key == "remaining_dur":
+                if raw_val is None or str(raw_val).strip() == "":
+                    entry[data_key] = ""
+                else:
+                    try:
+                        # Store as plain integer — no trailing .0
+                        entry[data_key] = str(int(float(str(raw_val).strip())))
+                    except ValueError:
+                        entry[data_key] = str(raw_val).strip()
+            elif data_key == "comments_import":
+                # Store as plain string; semicolons preserved for import_string_to_comments
+                entry[data_key] = "" if raw_val is None else str(raw_val).strip()
             else:
                 entry[data_key] = "" if raw_val is None else str(raw_val).strip()
         if not entry["activity_id"]:
@@ -713,11 +763,12 @@ MSP_STATUS_MAP = {
     "":             "Not Started",
 }
 
-def strip_wbs_prefix(wbs: str) -> str:
+def strip_wbs_prefix(wbs) -> str:
     """Strip the P6 project-name prefix from a stored WBS code.
     'ProjectX.1.2.3'  →  '1.2.3'
     '1.2.3'           →  '1.2.3'  (already clean, first segment is numeric)
     """
+    wbs = str(wbs or "")
     if not wbs:
         return ""
     parts = wbs.strip().split(".", 1)
@@ -740,11 +791,12 @@ def strip_msp_wbs(wbs: str) -> str:
         return ""
     return ".".join(segments[:-1])
 
-def get_project_from_wbs(wbs: str) -> str:
+def get_project_from_wbs(wbs) -> str:
     """Extract the project name from a WBS code.
     'ProjectA.1.2.3' -> 'ProjectA'
     '1.2.3'          -> '(Unassigned)'
     """
+    wbs = str(wbs or "")
     if not wbs:
         return "(Unassigned)"
     parts = wbs.strip().split(".", 1)
@@ -760,7 +812,7 @@ def get_all_projects(entries: list[dict]) -> list[str]:
 
 def filter_by_project(entries: list[dict], project: str) -> list[dict]:
     """Filter entries to those belonging to the given project name."""
-    if not project or project == "— All Projects —":
+    if not project:
         return entries
     return [e for e in entries if get_project_from_wbs(e.get("wbs_id", "")) == project]
 
@@ -806,6 +858,276 @@ def rename_project(entries: list[dict], old_name: str, new_name: str) -> tuple[l
             st.session_state.pop(_k, None)
 
     return entries, changed
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROJECT SETTINGS  (report date, future: holidays)
+# Stored as {project_name: {report_date: "YYYY-MM-DD"}}
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_project_settings() -> dict:
+    if PROJ_SETTINGS.exists():
+        try:
+            return json.loads(PROJ_SETTINGS.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+def save_project_settings(settings: dict) -> None:
+    PROJ_SETTINGS.write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+def get_report_date(project: str) -> date | None:
+    """Return the stored report date for a project, or None."""
+    settings = load_project_settings()
+    raw = settings.get(project, {}).get("report_date")
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+def set_report_date(project: str, report_dt: date) -> None:
+    settings = load_project_settings()
+    settings.setdefault(project, {})["report_date"] = report_dt.isoformat()
+    save_project_settings(settings)
+
+
+def get_last_walk_date(project: str) -> date | None:
+    """Return the stored last site walk date for a project, or None."""
+    settings = load_project_settings()
+    raw = settings.get(project, {}).get("last_walk_date")
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+def set_last_walk_date(project: str, walk_dt: date) -> None:
+    settings = load_project_settings()
+    settings.setdefault(project, {})["last_walk_date"] = walk_dt.isoformat()
+    save_project_settings(settings)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NOTIFICATIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_notifications() -> list[dict]:
+    if NOTIF_FILE.exists():
+        try:
+            return json.loads(NOTIF_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+    return []
+
+def save_notifications(notifs: list[dict]) -> None:
+    NOTIF_FILE.write_text(
+        json.dumps(notifs, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+def get_project_admin_recipients(project: str) -> list[str]:
+    """Return usernames of admin/developer users who have access to this project."""
+    recipients = []
+    for username, user in USERS.items():
+        role = user.get("role", "")
+        if role in ("admin", "developer"):
+            if user_can_access_project(username, project):
+                recipients.append(username)
+    return recipients
+
+
+def create_notification(created_by: str, project: str, title: str, body: str,
+                        recipients: list[str] | None = None,
+                        rows: list[dict] | None = None) -> None:
+    """Create a notification. rows is an optional list of dicts shown as a table."""
+    if recipients is None:
+        recipients = get_project_admin_recipients(project)
+    notifs = load_notifications()
+    notifs.append({
+        "id":         uuid.uuid4().hex,
+        "created_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "created_by": created_by,
+        "project":    project,
+        "title":      title,
+        "body":       body,
+        "rows":       rows or [],
+        "recipients": recipients,
+        "read_by":    [],
+    })
+    save_notifications(notifs)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB VISIBILITY
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_tab_visibility() -> dict:
+    if TAB_VIS_FILE.exists():
+        try:
+            return json.loads(TAB_VIS_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+def save_tab_visibility(vis: dict) -> None:
+    TAB_VIS_FILE.write_text(
+        json.dumps(vis, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+def is_tab_visible(perm: str, username: str, role: str) -> bool:
+    """Return True if this tab should be shown for this user.
+    Developer always sees all permitted tabs.
+    Checks role default then user override.
+    """
+    if role == "developer":
+        return True
+    vis = load_tab_visibility()
+    role_visible = vis.get("roles", {}).get(role, {}).get(perm, True)
+    user_vis = vis.get("users", {}).get(username, {})
+    if perm in user_vis:
+        return user_vis[perm]
+    return role_visible
+
+
+def mark_notification_read(notif_id: str, username: str) -> None:
+    notifs = load_notifications()
+    for n in notifs:
+        if n["id"] == notif_id and username not in n["read_by"]:
+            n["read_by"].append(username)
+    save_notifications(notifs)
+
+def delete_notification(notif_id: str) -> None:
+    save_notifications([n for n in load_notifications() if n["id"] != notif_id])
+
+def unread_notifications(username: str) -> list[dict]:
+    """Return notifications unread by this user and addressed to them."""
+    return [
+        n for n in load_notifications()
+        if username not in n.get("read_by", [])
+        and (not n.get("recipients") or username in n.get("recipients", []))
+    ]
+
+
+def get_allowed_users(project: str) -> list[str]:
+    """Return list of usernames allowed on this project.
+    Empty list means no restriction — all users are allowed.
+    """
+    settings = load_project_settings()
+    return settings.get(project, {}).get("allowed_users", [])
+
+def set_allowed_users(project: str, usernames: list[str]) -> None:
+    settings = load_project_settings()
+    settings.setdefault(project, {})["allowed_users"] = usernames
+    save_project_settings(settings)
+
+def user_can_access_project(username: str, project: str) -> bool:
+    """Return True if username is allowed to access project.
+    If allowed_users is empty, all users are permitted (no restriction set).
+    '(Unassigned)' is always accessible to everyone.
+    """
+    if project == "(Unassigned)":
+        return True
+    allowed = get_allowed_users(project)
+    if not allowed:          # no restriction configured
+        return True
+    return username in allowed
+
+def get_accessible_projects(username: str, all_projects: list[str]) -> list[str]:
+    """Filter a list of project names to those the user can access."""
+    return [p for p in all_projects if user_can_access_project(username, p)]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKING DAYS & DURATION CALCULATIONS
+# Weekends excluded; public holidays can be added to HOLIDAYS set later.
+# ══════════════════════════════════════════════════════════════════════════════
+
+HOLIDAYS: set[date] = set()   # add dates here when needed, e.g. date(2026,1,1)
+
+def working_days_between(start: date, end: date) -> int:
+    """Count working days (Mon–Fri, excluding HOLIDAYS) from start up to but not
+    including end.  Returns 0 if end <= start."""
+    from datetime import timedelta as _td
+    if end <= start:
+        return 0
+    total = 0
+    cur   = start
+    while cur < end:
+        if cur.weekday() < 5 and cur not in HOLIDAYS:
+            total += 1
+        cur += _td(days=1)
+    return total
+
+def _add_working_days(start: date, days: int) -> date:
+    """Return the date that is `days` working days after start."""
+    if days <= 0:
+        return start
+    cur   = start
+    added = 0
+    while added < days:
+        cur = date.fromordinal(cur.toordinal() + 1)
+        if cur.weekday() < 5 and cur not in HOLIDAYS:
+            added += 1
+    return cur
+
+def expected_finish_date(report_date: date, remaining_dur: str) -> date | None:
+    """Calculate expected finish = report_date + remaining working days."""
+    try:
+        days = int(float(remaining_dur))
+    except (ValueError, TypeError):
+        return None
+    if days < 0:
+        return None
+    return _add_working_days(report_date, days)
+
+def calc_duration_pct(actual_start_iso: str, expected_finish: date,
+                      report_date: date) -> int | None:
+    """
+    Duration % complete = working days elapsed / total working days * 100.
+    Elapsed = actual_start → report_date
+    Total   = actual_start → expected_finish
+    Returns integer 0-99 (never 100 — only Completed activities are 100%).
+    Returns None if data is insufficient.
+    """
+    start_dt = iso_to_dt(actual_start_iso)
+    if start_dt is None:
+        return None
+    start_d = start_dt.date()
+    if report_date <= start_d or expected_finish <= start_d:
+        return None
+    # Include the report date itself in elapsed (count up to day after)
+    from datetime import timedelta as _td
+    elapsed = working_days_between(start_d, report_date + _td(days=1))
+    total   = working_days_between(start_d, expected_finish + _td(days=1))
+    if total == 0:
+        return None
+    pct = min(99, int(elapsed / total * 100))
+    return pct
+
+def recalculate_project(entries: list[dict], project: str,
+                        report_date: date) -> tuple[list[dict], int]:
+    """
+    Recalculate duration % complete for all In Progress activities in project.
+    Only updates pct_complete — all other fields are unchanged.
+    Returns (entries, count_updated).
+    """
+    updated = 0
+    for entry in entries:
+        if entry.get("activity_status") != "In Progress":
+            continue
+        if get_project_from_wbs(entry.get("wbs_id","")) != project:
+            continue
+        ef = expected_finish_date(report_date, entry.get("remaining_dur",""))
+        if ef is None:
+            continue
+        pct = calc_duration_pct(entry.get("actual_start",""), ef, report_date)
+        if pct is not None:
+            entry["pct_complete"] = str(pct)
+            updated += 1
+    return entries, updated
 
 
 def read_msp_excel(file_bytes: bytes) -> tuple:
@@ -883,10 +1205,11 @@ def read_msp_excel(file_bytes: bytes) -> tuple:
                 if raw_val is None:
                     entry[data_key] = ""
                 else:
-                    dur_str = str(raw_val).strip()
-                    import re as _re
-                    m = _re.search(r"(\d+\.?\d*)", dur_str)
-                    entry[data_key] = m.group(1) if m else ""
+                    try:
+                        # Store as plain integer — no trailing .0
+                        entry[data_key] = str(int(float(str(raw_val).strip())))
+                    except ValueError:
+                        entry[data_key] = str(raw_val).strip()
             else:
                 entry[data_key] = "" if raw_val is None else str(raw_val).strip()
 
@@ -915,7 +1238,7 @@ def match_msp_to_stored(msp_rows: list[dict], stored: list[dict]) -> tuple:
     for e in stored:
         key = (
             e.get("activity_name", "").strip().lower(),
-            strip_wbs_prefix(e.get("wbs_id", "")).lower(),
+            strip_wbs_prefix(str(e.get("wbs_id", "") or "")).lower(),
         )
         lookup.setdefault(key, []).append(e)
 
@@ -923,7 +1246,7 @@ def match_msp_to_stored(msp_rows: list[dict], stored: list[dict]) -> tuple:
     for row in msp_rows:
         key = (
             row.get("activity_name", "").strip().lower(),
-            row.get("wbs_id", "").lower(),
+            str(row.get("wbs_id", "") or "").lower(),
         )
         hits = lookup.get(key, [])
         if len(hits) == 1:
@@ -990,7 +1313,7 @@ def detect_wbs_offset(unmatched: list[dict], stored: list[dict]) -> list[dict]:
 
                 # Compare against stored WBS after stripping P6 prefix
                 for e in candidates:
-                    stored_wbs_clean = strip_wbs_prefix(e.get("wbs_id","")).lower()
+                    stored_wbs_clean = strip_wbs_prefix(str(e.get("wbs_id","") or "")).lower()
                     if stored_wbs_clean == adj_wbs.lower():
                         suggestions.append({
                             "msp_row":      row,
@@ -1105,7 +1428,7 @@ if not st.session_state.authenticated:
             password = st.text_input("Password", type="password", placeholder="Enter your password")
             if st.button("Log In", type="primary", use_container_width=True):
                 user = USERS.get(username)
-                if _hcheck(password, user["hash"]) == True:
+                if user and _hcheck(password, user["hash"]):
                     st.session_state.update({
                         "authenticated": True, "username": username,
                         "display_name": user["name"], "role": user["role"],
@@ -1132,23 +1455,66 @@ with st.sidebar:
 
     # ── Shared project selector ────────────────────────────────────────────
     _all_entries_for_projects = load_entries()
-    _projects = ["— All Projects —"] + get_all_projects(_all_entries_for_projects)
-    if "selected_project" not in st.session_state:
-        st.session_state["selected_project"] = "— All Projects —"
-    # Keep selection valid if projects have changed
-    if st.session_state["selected_project"] not in _projects:
-        st.session_state["selected_project"] = "— All Projects —"
+    _all_projects_raw = get_all_projects(_all_entries_for_projects)
+    # Filter to only projects this user can access
+    _accessible = get_accessible_projects(
+        st.session_state.get("username", ""), _all_projects_raw
+    )
+    _projects = _accessible  # no "All Projects" option
+
+    if "selected_project" not in st.session_state or             st.session_state["selected_project"] not in _projects:
+        st.session_state["selected_project"] = _projects[0] if _projects else ""
 
     st.session_state["selected_project"] = st.selectbox(
         "📁 Project",
-        options=_projects,
-        index=_projects.index(st.session_state["selected_project"]),
+        options=_projects if _projects else ["— No projects —"],
+        index=_projects.index(st.session_state["selected_project"])
+              if st.session_state["selected_project"] in _projects else 0,
         key="sidebar_project_select",
     )
     _sel_project = st.session_state["selected_project"]
+
+    # ── Report Date (per-project) ──────────────────────────────────────────
+    if _sel_project and _sel_project != "— No projects —":
+        st.divider()
+        _stored_report_date = get_report_date(_sel_project)
+        _report_date_val    = _stored_report_date or date.today()
+
+        _new_report_date = st.date_input(
+            "📅 Report Date",
+            value=_report_date_val,
+            format="DD/MM/YYYY",
+            key="sidebar_report_date",
+            help="Date of the last progress report. Used to calculate expected "
+                 "finish and duration % complete for In Progress activities.",
+        )
+
+        # Trigger recalculation when the date actually changes
+        _prev_key = f"_prev_report_date_{_sel_project}"
+        if _new_report_date != st.session_state.get(_prev_key):
+            st.session_state[_prev_key] = _new_report_date
+            set_report_date(_sel_project, _new_report_date)
+            _recalc_entries = load_entries()
+            _recalc_entries, _n_updated = recalculate_project(
+                _recalc_entries, _sel_project, _new_report_date
+            )
+            if _n_updated:
+                save_entries(_recalc_entries)
+                st.caption(f"♻️ {_n_updated} activities recalculated.")
+
+        if _stored_report_date:
+            st.caption(f"Report date: {_stored_report_date.strftime('%d/%m/%Y')}")
+
     st.divider()
     st.caption("Entries: p6_asbuilt_store.json")
     st.caption("Photos:  p6_images/")
+    st.divider()
+    if has_permission("settings"):
+        _unread = unread_notifications(st.session_state.get("username",""))
+        st.caption(
+            f"🔔  {len(_unread)} unread notification{'s' if len(_unread) != 1 else ''}"
+            if _unread else "🔔  No new notifications"
+        )
     st.divider()
     if st.button("🔄  Refresh", use_container_width=True,
                  help="Reload data from disk to see updates from other users."):
@@ -1177,8 +1543,15 @@ TAB_DEFS = [
     ("📥  Export to Excel",   "export"),
     ("📸  Photo Log",         "photos"),
     ("⚙️  Settings",          "settings"),
+    (" Site Walk",         "sitewalk"),
 ]
-visible   = [(lbl, perm) for lbl, perm in TAB_DEFS if has_permission(perm)]
+_sw_username = st.session_state.get("username", "")
+_sw_role     = st.session_state.get("role", "")
+visible   = [
+    (lbl, perm) for lbl, perm in TAB_DEFS
+    if has_permission(perm)
+    and is_tab_visible(perm, _sw_username, _sw_role)
+]
 tab_objs  = st.tabs([lbl for lbl, _ in visible])
 tab_index = {perm: tab_objs[i] for i, (_, perm) in enumerate(visible)}
 
@@ -1186,220 +1559,227 @@ tab_index = {perm: tab_objs[i] for i, (_, perm) in enumerate(visible)}
 # TAB: VIEW ALL ENTRIES
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab_index["view"]:
-    entries = load_entries()
-    _sel_project = st.session_state.get("selected_project", "— All Projects —")
-    entries = filter_by_project(entries, _sel_project)
-    _proj_label = f" — {_sel_project}" if _sel_project != "— All Projects —" else ""
-    st.subheader(f"All Entries ({len(entries)}){_proj_label}")
-
-    if not entries:
-        st.info("No entries yet." if _sel_project == "— All Projects —"
-                else f"No entries for project '{_sel_project}'.")
-    else:
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total",       len(entries))
-        m2.metric("Completed",   sum(1 for e in entries if e.get("activity_status") == "Completed"))
-        m3.metric("In Progress", sum(1 for e in entries if e.get("activity_status") == "In Progress"))
-        m4.metric("Not Started", sum(1 for e in entries if e.get("activity_status") == "Not Started"))
-        st.divider()
-
-        # ── Search + Sort controls ─────────────────────────────────────────
-        search_col, sort_col, dir_col = st.columns([3, 2, 1])
-        with search_col:
-            search_text = st.text_input(
-                "Search",
-                placeholder="Activity ID or name…",
-                key="view_search",
-            ).strip().lower()
-        with sort_col:
-            sort_by = st.selectbox(
-                "Sort by",
-                options=["WBS Code", "Actual Start", "Actual Finish", "Activity ID"],
-                key="view_sort_by",
-            )
-        with dir_col:
-            sort_asc = st.radio(
-                "Order", options=["↑ Asc", "↓ Desc"],
-                key="view_sort_dir", horizontal=True,
-            ) == "↑ Asc"
-
-        # Apply search filter before sorting
-        if search_text:
-            entries = [
-                e for e in entries
-                if search_text in e.get("activity_id",   "").lower()
-                or search_text in e.get("activity_name", "").lower()
-                or search_text in e.get("wbs_id",        "").lower()
-            ]
-
-        def wbs_key(e: dict):
-            parts = e.get("wbs_id", "").split(".")
-            segments = []
-            for p in parts:
-                try:
-                    segments.append((0, int(p)))
-                except ValueError:
-                    segments.append((1, p.lower()))
-            return segments or [(1, "")]
-
-        def date_key(field: str):
-            def _key(e: dict):
-                dt = iso_to_dt(e.get(field, ""))
-                return dt if dt else (datetime.min if sort_asc else datetime.max)
-            return _key
-
-        if sort_by == "WBS Code":
-            sorted_entries = sorted(entries, key=wbs_key, reverse=not sort_asc)
-        elif sort_by == "Actual Start":
-            sorted_entries = sorted(entries, key=date_key("actual_start"), reverse=not sort_asc)
-        elif sort_by == "Actual Finish":
-            sorted_entries = sorted(entries, key=date_key("actual_finish"), reverse=not sort_asc)
+if "view" in tab_index:
+    with tab_index["view"]:
+        entries = load_entries()
+        _sel_project = st.session_state.get("selected_project", "")
+        entries = filter_by_project(entries, _sel_project)
+        st.subheader(f"All Entries ({len(entries)}) — {_sel_project}")
+    
+        if not entries:
+            st.info(f"No entries for project '{_sel_project}'." if _sel_project
+                    else "No project selected.")
         else:
-            sorted_entries = sorted(entries, key=lambda e: e.get("activity_id", "").upper(), reverse=not sort_asc)
-
-        st.divider()
-
-        can_edit   = has_permission("submit")
-        can_delete = has_permission("submit")
-
-        # ── Pagination ─────────────────────────────────────────────────────
-        PAGE_SIZE = 25
-        total_pages = max(1, (len(sorted_entries) + PAGE_SIZE - 1) // PAGE_SIZE)
-        page = st.number_input(
-            f"Page (1 – {total_pages})",
-            min_value=1, max_value=total_pages, value=1, step=1,
-            key="view_page",
-        ) - 1  # zero-based
-        page_entries = sorted_entries[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
-        total_label  = f"{len(sorted_entries)} match{'es' if len(sorted_entries) != 1 else ''}" if search_text else f"{len(sorted_entries)} entries"
-        st.caption(
-            f"Showing {page * PAGE_SIZE + 1}–{min((page + 1) * PAGE_SIZE, len(sorted_entries))} "
-            f"of {total_label}"
-        )
-        st.divider()
-
-        # Keyed by (activity_id, project) to support same IDs across projects
-        id_to_index = {
-            (e.get("activity_id","").upper(),
-             get_project_from_wbs(e.get("wbs_id",""))): idx
-            for idx, e in enumerate(entries)
-        }
-
-        for entry in page_entries:
-            i     = id_to_index.get(
-                (entry.get("activity_id","").upper(),
-                 get_project_from_wbs(entry.get("wbs_id",""))), 0)
-            status    = entry.get("activity_status", "")
-            act_id    = entry.get("activity_id", "")
-            act_name  = entry.get("activity_name", "")
-            wbs       = entry.get("wbs_id", "—")
-            pct       = entry.get("pct_complete", "0")
-            rem       = entry.get("remaining_dur", "—")
-            a_start   = display_dt(entry.get("actual_start", ""))
-            a_finish  = display_dt(entry.get("actual_finish", ""))
-            subm_at   = entry.get("_submitted_at", "")
-            submitter = entry.get("_submitted_by", "")
-            n_comments = len(entry.get("_comments", []))
-
-            with st.container(border=True):
-                # ── Header row ─────────────────────────────────────────────
-                head_left, head_left2, head_right = st.columns([2, 2, 1])
-                with head_left:
-                    st.write(f"Activity ID: {act_id}")
-                with head_left2:
-                    st.write(f"Activity Name: {act_name}")
-                with head_right:
-                    st.write(status)
-
-                # ── Detail row ─────────────────────────────────────────────
-                c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 0.3, 0.4], gap="xsmall")
-                c1.write("WBS");      c1.write(wbs)
-                c2.write("Start");    c2.write(a_start)
-                c3.write("Finish");   c3.write(a_finish)
-                c4.metric("% Complete", f"{pct}%")
-                c5.metric("Remaining", f"{rem} days" if rem and rem != "—" else "—")
-
-                # ── Footer ─────────────────────────────────────────────────
-                footer = f"Last updated: {subm_at}"
-                if submitter:
-                    footer += f"  ·  By: {submitter}"
-                if n_comments:
-                    footer += f"  ·  💬 {n_comments} comment{'s' if n_comments != 1 else ''}"
-                st.caption(footer)
-
-                # ── Inline edit expander (submit/admin only) ───────────────
-                if can_edit:
-                    with st.expander("✏️  Edit name / Add comment"):
-                        # Activity name
-                        st.write("**Edit Activity Name**")
-                        new_name = st.text_input(
-                            "Activity Name",
-                            value=act_name,
-                            key=f"edit_name_{i}",
-                            label_visibility="collapsed",
-                        ).strip()
-
-                        st.divider()
-
-                        # Existing comments
-                        st.write("**Comments**")
-                        existing_comments = entry.get("_comments", [])
-                        if existing_comments:
-                            for c in existing_comments:
-                                st.write(f"**{c['at']}** — {c['by']}")
-                                st.write(c["text"])
-                                st.divider()
-                        else:
-                            st.caption("No comments yet.")
-
-                        new_comment_text = st.text_area(
-                            "Add comment",
-                            placeholder="Enter progress notes, observations, or issues...",
-                            height=100,
-                            key=f"view_comment_{i}",
-                            label_visibility="collapsed",
-                        ).strip()
-
-                        # Save button — only active if something changed
-                        name_changed    = new_name != act_name and new_name != ""
-                        comment_entered = bool(new_comment_text)
-
-                        if st.button(
-                            "💾  Save changes",
-                            key=f"edit_save_{i}",
-                            type="primary",
-                            disabled=not (name_changed or comment_entered),
-                        ):
-                            updated = entry.copy()
-                            if name_changed:
-                                updated["activity_name"] = new_name
-                            if comment_entered:
-                                new_record = {
-                                    "text": new_comment_text,
-                                    "by":   st.session_state.display_name,
-                                    "at":   datetime.now().strftime("%d/%m/%Y %H:%M"),
-                                }
-                                updated["_comments"] = [new_record] + existing_comments
-                            updated["_submitted_at"] = datetime.now().strftime("%d/%m/%Y %H:%M")
-                            updated["_submitted_by"] = st.session_state.display_name
-                            entries[i] = updated
-                            save_entries(entries)
-                            st.success("Saved.")
-                            st.rerun()
-
-                # ── Delete button ──────────────────────────────────────────
-                if can_delete and st.button(f"🗑 Delete {act_id}", key=f"del_{i}"):
-                    entries.pop(i)
-                    save_entries(entries)
-                    st.rerun()
-
-        st.dataframe(sorted_entries)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB: SUBMIT / UPDATE
-# ══════════════════════════════════════════════════════════════════════════════
-
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Total",       len(entries))
+            m2.metric("Completed",   sum(1 for e in entries if e.get("activity_status") == "Completed"))
+            m3.metric("In Progress", sum(1 for e in entries if e.get("activity_status") == "In Progress"))
+            m4.metric("Not Started", sum(1 for e in entries if e.get("activity_status") == "Not Started"))
+            st.divider()
+    
+            # ── Search + Sort controls ─────────────────────────────────────────
+            search_col, sort_col, dir_col = st.columns([3, 2, 1])
+            with search_col:
+                search_text = st.text_input(
+                    "Search",
+                    placeholder="Activity ID or name…",
+                    key="view_search",
+                ).strip().lower()
+            with sort_col:
+                sort_by = st.selectbox(
+                    "Sort by",
+                    options=["WBS Code", "Actual Start", "Actual Finish", "Activity ID"],
+                    key="view_sort_by",
+                )
+            with dir_col:
+                sort_asc = st.radio(
+                    "Order", options=["↑ Asc", "↓ Desc"],
+                    key="view_sort_dir", horizontal=True,
+                ) == "↑ Asc"
+    
+            # Apply search filter before sorting
+            if search_text:
+                entries = [
+                    e for e in entries
+                    if search_text in str(e.get("activity_id",   "") or "").lower()
+                    or search_text in str(e.get("activity_name", "") or "").lower()
+                    or search_text in str(e.get("wbs_id",        "") or "").lower()
+                ]
+    
+            def wbs_key(e: dict):
+                parts = str(e.get("wbs_id", "") or "").split(".")
+                segments = []
+                for p in parts:
+                    try:
+                        segments.append((0, int(p)))
+                    except ValueError:
+                        segments.append((1, p.lower()))
+                return segments or [(1, "")]
+    
+            def date_key(field: str):
+                def _key(e: dict):
+                    dt = iso_to_dt(e.get(field, ""))
+                    return dt if dt else (datetime.min if sort_asc else datetime.max)
+                return _key
+    
+            if sort_by == "WBS Code":
+                sorted_entries = sorted(entries, key=wbs_key, reverse=not sort_asc)
+            elif sort_by == "Actual Start":
+                sorted_entries = sorted(entries, key=date_key("actual_start"), reverse=not sort_asc)
+            elif sort_by == "Actual Finish":
+                sorted_entries = sorted(entries, key=date_key("actual_finish"), reverse=not sort_asc)
+            else:
+                sorted_entries = sorted(entries, key=lambda e: e.get("activity_id", "").upper(), reverse=not sort_asc)
+    
+            st.divider()
+    
+            can_edit   = has_permission("submit")
+            can_delete = has_permission("submit")
+    
+            # ── Pagination ─────────────────────────────────────────────────────
+            PAGE_SIZE = 25
+            total_pages = max(1, (len(sorted_entries) + PAGE_SIZE - 1) // PAGE_SIZE)
+            page = st.number_input(
+                f"Page (1 – {total_pages})",
+                min_value=1, max_value=total_pages, value=1, step=1,
+                key="view_page",
+            ) - 1  # zero-based
+            page_entries = sorted_entries[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+            total_label  = f"{len(sorted_entries)} match{'es' if len(sorted_entries) != 1 else ''}" if search_text else f"{len(sorted_entries)} entries"
+            st.caption(
+                f"Showing {page * PAGE_SIZE + 1}–{min((page + 1) * PAGE_SIZE, len(sorted_entries))} "
+                f"of {total_label}"
+            )
+            st.divider()
+    
+            # Keyed by (activity_id, project) to support same IDs across projects
+            id_to_index = {
+                (e.get("activity_id","").upper(),
+                 get_project_from_wbs(e.get("wbs_id",""))): idx
+                for idx, e in enumerate(entries)
+            }
+    
+            for entry in page_entries:
+                i     = id_to_index.get(
+                    (entry.get("activity_id","").upper(),
+                     get_project_from_wbs(entry.get("wbs_id",""))), 0)
+                status    = entry.get("activity_status", "")
+                act_id    = entry.get("activity_id", "")
+                act_name  = entry.get("activity_name", "")
+                wbs       = entry.get("wbs_id", "—")
+                pct       = entry.get("pct_complete", "0")
+                rem       = entry.get("remaining_dur", "—")
+                a_start   = display_dt(entry.get("actual_start", ""))
+                a_finish  = display_dt(entry.get("actual_finish", ""))
+                subm_at   = entry.get("_submitted_at", "")
+                submitter = entry.get("_submitted_by", "")
+                n_comments = len(entry.get("_comments", []))
+    
+                with st.container(border=True):
+                    # ── Header row ─────────────────────────────────────────────
+                    head_left, head_left2, head_right = st.columns([2, 2, 1])
+                    with head_left:
+                        st.write(f"Activity ID: {act_id}")
+                    with head_left2:
+                        st.write(f"Activity Name: {act_name}")
+                    with head_right:
+                        st.write(status)
+    
+                    # ── Detail row ─────────────────────────────────────────────
+                    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 0.3, 0.4], gap="xsmall")
+                    c1.write("WBS");      c1.write(wbs)
+                    c2.write("Start");    c2.write(a_start)
+                    # Show expected finish for In Progress if report date is set
+                    _rpt_view = get_report_date(get_project_from_wbs(entry.get("wbs_id","")))
+                    _exp_f_str = ""
+                    if status == "In Progress" and _rpt_view and entry.get("remaining_dur"):
+                        _ef_view = expected_finish_date(_rpt_view, entry.get("remaining_dur",""))
+                        if _ef_view:
+                            _exp_f_str = f" (exp. {_ef_view.strftime('%d/%m/%Y')})"
+                    c3.write("Finish");   c3.write(a_finish + _exp_f_str if _exp_f_str else a_finish)
+                    c4.metric("% Complete", f"{pct}%")
+                    c5.metric("Remaining", f"{rem} days" if rem and rem != "—" else "—")
+    
+                    # ── Footer ─────────────────────────────────────────────────
+                    footer = f"Last updated: {subm_at}"
+                    if submitter:
+                        footer += f"  ·  By: {submitter}"
+                    if n_comments:
+                        footer += f"  ·  💬 {n_comments} comment{'s' if n_comments != 1 else ''}"
+                    st.caption(footer)
+    
+                    # ── Inline edit expander (submit/admin only) ───────────────
+                    if can_edit:
+                        with st.expander("✏️  Edit name / Add comment"):
+                            # Activity name
+                            st.write("**Edit Activity Name**")
+                            new_name = st.text_input(
+                                "Activity Name",
+                                value=act_name,
+                                key=f"edit_name_{i}",
+                                label_visibility="collapsed",
+                            ).strip()
+    
+                            st.divider()
+    
+                            # Existing comments
+                            st.write("**Comments**")
+                            existing_comments = entry.get("_comments", [])
+                            if existing_comments:
+                                for c in existing_comments:
+                                    st.write(f"**{c['at']}** — {c['by']}")
+                                    st.write(c["text"])
+                                    st.divider()
+                            else:
+                                st.caption("No comments yet.")
+    
+                            new_comment_text = st.text_area(
+                                "Add comment",
+                                placeholder="Enter progress notes, observations, or issues...",
+                                height=100,
+                                key=f"view_comment_{i}",
+                                label_visibility="collapsed",
+                            ).strip()
+    
+                            # Save button — only active if something changed
+                            name_changed    = new_name != act_name and new_name != ""
+                            comment_entered = bool(new_comment_text)
+    
+                            if st.button(
+                                "💾  Save changes",
+                                key=f"edit_save_{i}",
+                                type="primary",
+                                disabled=not (name_changed or comment_entered),
+                            ):
+                                updated = entry.copy()
+                                if name_changed:
+                                    updated["activity_name"] = new_name
+                                if comment_entered:
+                                    new_record = {
+                                        "text": new_comment_text,
+                                        "by":   st.session_state.display_name,
+                                        "at":   datetime.now().strftime("%d/%m/%Y %H:%M"),
+                                    }
+                                    updated["_comments"] = [new_record] + existing_comments
+                                updated["_submitted_at"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+                                updated["_submitted_by"] = st.session_state.display_name
+                                entries[i] = updated
+                                save_entries(entries)
+                                st.success("Saved.")
+                                st.rerun()
+    
+                    # ── Delete button ──────────────────────────────────────────
+                    if can_delete and st.button(f"🗑 Delete {act_id}", key=f"del_{i}"):
+                        entries.pop(i)
+                        save_entries(entries)
+                        st.rerun()
+    
+            st.dataframe(sorted_entries)
+    
+    # ══════════════════════════════════════════════════════════════════════════════
+    # TAB: SUBMIT / UPDATE
+    # ══════════════════════════════════════════════════════════════════════════════
+    
 if "submit" in tab_index:
     with tab_index["submit"]:
         entries   = load_entries()
@@ -1408,9 +1788,11 @@ if "submit" in tab_index:
         st.subheader("Submit or Update an Asbuilt Entry")
 
         # ── Project selector ───────────────────────────────────────────────
-        _all_projects_submit = get_all_projects(entries)
+        _all_projects_submit = get_accessible_projects(
+            st.session_state.get("username", ""), get_all_projects(entries)
+        )
         _proj_options_submit = _all_projects_submit + ["＋ New project…"]
-        _sel_project = st.session_state.get("selected_project", "— All Projects —")
+        _sel_project = st.session_state.get("selected_project", "")
         _default_proj = _sel_project if _sel_project in _all_projects_submit else (
             _all_projects_submit[0] if _all_projects_submit else None
         )
@@ -1491,11 +1873,11 @@ if "submit" in tab_index:
         actual_start_dt  = None
         actual_finish_dt = None
         pct_complete     = 0
-        remaining_dur    = ""
+        remaining_dur    = 0
 
         if activity_status == "Not Started":
             st.info(
-                "% Complete is set to 0 and Remaining Duration left blank automatically "
+                "% Complete is set to 0 automatically "
                 "for 'Not Started' activities.", icon="ℹ️"
             )
 
@@ -1505,16 +1887,40 @@ if "submit" in tab_index:
                 default_dt=_existing_dt("actual_start"),
             )
             col_p, col_r = st.columns(2)
-            with col_p:
-                pct_complete = st.number_input(
-                    "Duration % Complete *", min_value=0, max_value=99, step=5,
-                    value=int(existing.get("pct_complete" )or 0) if existing else 0,
-                )
             with col_r:
                 remaining_dur = st.text_input(
                     "Remaining Duration (days) *", placeholder="e.g. 5",
                     value=existing.get("remaining_dur", "") if existing else "",
                 ).strip()
+
+            # Calculate suggested pct from report date if available
+            _rpt_date_submit = get_report_date(submit_project) if submit_project else None
+            _suggested_pct   = None
+            _exp_finish_disp = None
+            if _rpt_date_submit and remaining_dur and actual_start_dt:
+                _ef = expected_finish_date(_rpt_date_submit, remaining_dur)
+                if _ef:
+                    _exp_finish_disp = _ef.strftime("%d/%m/%Y")
+                    _suggested_pct   = calc_duration_pct(
+                        dt_to_iso(actual_start_dt), _ef, _rpt_date_submit
+                    )
+
+            with col_p:
+                _pct_default = _suggested_pct if _suggested_pct is not None else (
+                    int(existing.get("pct_complete") or 0) if existing else 0
+                )
+                pct_complete = st.number_input(
+                    "Duration % Complete *", min_value=0, max_value=99, step=5,
+                    value=_pct_default,
+                )
+                if _suggested_pct is not None:
+                    st.caption(
+                        f"💡 Calculated from report date: **{_suggested_pct}%**"
+                        + (f"  ·  Expected finish: **{_exp_finish_disp}**"
+                           if _exp_finish_disp else "")
+                    )
+                elif not _rpt_date_submit and submit_project:
+                    st.caption("ℹ️ Set a report date in the sidebar to auto-calculate %.")
 
         elif activity_status == "Completed":
             actual_start_dt = datetime_inputs(
@@ -1526,7 +1932,7 @@ if "submit" in tab_index:
                 default_dt=_existing_dt("actual_finish"),
             )
             pct_complete  = 100
-            remaining_dur = "0"
+            remaining_dur = 0
             st.info("% Complete set to 100 and Remaining Duration to 0 automatically.", icon="✅")
 
         # ── Comments section ──────────────────────────────────────────────
@@ -1579,9 +1985,11 @@ if "submit" in tab_index:
                     "actual_start":      dt_to_iso(actual_start_dt)  if actual_start_dt  else "",
                     "actual_finish":     dt_to_iso(actual_finish_dt) if actual_finish_dt else "",
                     "pct_complete":      str(pct_complete),
-                    "remaining_dur":     str(remaining_dur),
+                    "remaining_dur":     remaining_dur,
                     "complete_pct_type": "Physical",
                     "wbs_id":            wbs_input,
+                    "predicted_start":   existing.get("predicted_start", "") if existing else "",
+                    "task_type":         existing.get("task_type", "") if existing else "",
                     "_comments":         updated_comments,
                     "_submitted_at":     datetime.now().strftime("%d/%m/%Y %H:%M"),
                     "_submitted_by":     st.session_state.display_name,
@@ -1603,12 +2011,11 @@ if "submit" in tab_index:
 if "import" in tab_index:
     with tab_index["import"]:
         entries   = load_entries()
-        _sel_project = st.session_state.get("selected_project", "— All Projects —")
-        # Scope matching to the selected project only
+        _sel_project = st.session_state.get("selected_project", "")
         _entries_for_match = filter_by_project(entries, _sel_project)
         known_ids = {e["activity_id"].upper(): e for e in _entries_for_match}
 
-        if _sel_project != "— All Projects —":
+        if _sel_project:
             st.info(f"Importing into project: **{_sel_project}**", icon="📁")
 
         st.subheader("Import from Excel")
@@ -1903,11 +2310,13 @@ if "import" in tab_index:
                     st.caption("Each MSP row has been matched to a stored activity. Review the changes below.")
 
                     fields = [
-                        ("Status",          "activity_status", False),
-                        ("Actual Start",     "actual_start",    True),
-                        ("Actual Finish",    "actual_finish",   True),
-                        ("% Complete",       "pct_complete",    False),
-                        ("Remaining (days)", "remaining_dur",   False),
+                        ("Status",          "activity_status",  False),
+                        ("Actual Start",     "actual_start",     True),
+                        ("Actual Finish",    "actual_finish",    True),
+                        ("% Complete",       "pct_complete",     False),
+                        ("Remaining (days)", "remaining_dur",    False),
+                        ("Predicted Start",  "predicted_start",  True),
+                        ("Task Type",        "task_type",        False),
                     ]
                     for msp_row, stored_entry in matched:
                         aid = stored_entry["activity_id"].upper()
@@ -1998,10 +2407,11 @@ if "import" in tab_index:
                             stored["remaining_dur"]   = msp_row.get("remaining_dur")   or stored["remaining_dur"]
                             imp_str = msp_row.pop("comments_import", "") or ""
                             if imp_str:
-                                stored["_comments"] = (
-                                    import_string_to_comments(imp_str, st.session_state.display_name)
-                                    + stored.get("_comments", [])
-                                )
+                                _imp_cmts   = import_string_to_comments(imp_str, st.session_state.display_name)
+                                _exist_cmts = stored.get("_comments", [])
+                                _new_only   = merge_imported_comments(_imp_cmts, _exist_cmts)
+                                if _new_only:
+                                    stored["_comments"] = _new_only + _exist_cmts
                             stored["_submitted_at"] = datetime.now().strftime("%d/%m/%Y %H:%M")
                             stored["_submitted_by"] = st.session_state.display_name
                             return stored
@@ -2038,7 +2448,7 @@ if "import" in tab_index:
                                 "actual_start":      row.get("actual_start", ""),
                                 "actual_finish":     row.get("actual_finish", ""),
                                 "pct_complete":      row.get("pct_complete", "0"),
-                                "remaining_dur":     row.get("remaining_dur", ""),
+                                "remaining_dur":     row.get("remaining_dur", 0),
                                 "complete_pct_type": "Physical",
                                 "wbs_id":            row.get("wbs_id", ""),
                                 "_comments":         import_string_to_comments(imp_str, st.session_state.display_name),
@@ -2104,12 +2514,14 @@ if "import" in tab_index:
                                     f"{row.get('activity_name', existing.get('activity_name', ''))}")
                         with st.expander(label, expanded=True):
                             fields = [
-                                ("Status",          "activity_status", False),
-                                ("Actual Start",     "actual_start",    True),
-                                ("Actual Finish",    "actual_finish",   True),
-                                ("% Complete",       "pct_complete",    False),
-                                ("Remaining (days)", "remaining_dur",   False),
-                                ("WBS",              "wbs_id",          False),
+                                ("Status",          "activity_status",  False),
+                                ("Actual Start",     "actual_start",     True),
+                                ("Actual Finish",    "actual_finish",    True),
+                                ("% Complete",       "pct_complete",     False),
+                                ("Remaining (days)", "remaining_dur",    False),
+                                ("Predicted Start",  "predicted_start",  True),
+                                ("Task Type",        "task_type",        False),
+                                ("WBS",              "wbs_id",           False),
                             ]
                             existing_comment_count = len(existing.get("_comments", []))
                             incoming_comment_str   = row.get("comments_import", "").strip()
@@ -2125,7 +2537,7 @@ if "import" in tab_index:
                                 for lbl, k, is_date in fields:
                                     val = row.get(k, "") or ""
                                     st.write(f"- **{lbl}:** {display_dt(val) if is_date else (val or '—')}")
-                                st.write(f"- **Comments (user_field_910):** {incoming_comment_str or '—'}")
+                                st.write(f"- **Comments (user_field_813):** {incoming_comment_str or '—'}")
 
                             # Use a safe string key for st widgets (no special chars)
                             widget_key = f"{aid}__{project}"
@@ -2187,7 +2599,8 @@ if "import" in tab_index:
                                 stored_cmts  = entries[idx].get("_comments", [])
                                 imported_cmts = import_string_to_comments(imp_str, st.session_state.display_name)
                                 if comment_res == "Append imported comments to existing":
-                                    row["_comments"] = stored_cmts + imported_cmts
+                                    new_only = merge_imported_comments(imported_cmts, stored_cmts)
+                                    row["_comments"] = stored_cmts + new_only
                                 elif comment_res == "Replace with imported only":
                                     row["_comments"] = imported_cmts
                                 else:
@@ -2221,21 +2634,19 @@ if "export" in tab_index:
         st.write("- **Complete Type:** Always Physical as to not overide remaining durations with calulated values from percent complete")
         st.divider()
 
-        _sel_project = st.session_state.get("selected_project", "— All Projects —")
+        _sel_project = st.session_state.get("selected_project", "")
         entries = filter_by_project(entries, _sel_project)
-        _proj_label = f" ({_sel_project})" if _sel_project != "— All Projects —" else ""
 
         if not entries:
-            st.warning(f"No entries to export for project '{_sel_project}'." if _sel_project != "— All Projects —"
-                       else "No entries to export yet.")
+            st.warning(f"No entries to export for project '{_sel_project}'.")
         else:
-            st.info(f"{len(entries)} {'entry' if len(entries) == 1 else 'entries'} ready to export{_proj_label}.")
+            st.info(f"{len(entries)} {'entry' if len(entries) == 1 else 'entries'} ready to export ({_sel_project}).")
 
             # ── Project name / WBS prefix ─────────────────────────────────
             # Detect the current prefix from the first entry that has one
             _current_prefix = ""
             for _e in entries:
-                _wbs = _e.get("wbs_id", "")
+                _wbs = str(_e.get("wbs_id", "") or "")
                 if _wbs and "." in _wbs:
                     _first_seg = _wbs.split(".")[0]
                     if not _first_seg.isdigit():
@@ -2306,7 +2717,15 @@ if "photos" in tab_index:
     with tab_index["photos"]:
         ensure_photo_dir()
         entries           = load_entries()
-        known_ids_ordered = [e["activity_id"] for e in entries]
+        # Filter activity list to projects the current user can access
+        _accessible_photo = get_accessible_projects(
+            st.session_state.get("username", ""), get_all_projects(entries)
+        )
+        known_ids_ordered = [
+            e["activity_id"] for e in entries
+            if get_project_from_wbs(e.get("wbs_id","")) in _accessible_photo
+            or get_project_from_wbs(e.get("wbs_id","")) == "(Unassigned)"
+        ]
         # Keyed by (activity_id.upper(), project) to disambiguate same IDs across projects
         known_map = {
             (e["activity_id"].upper(),
@@ -2458,7 +2877,10 @@ if "photos" in tab_index:
                     options=known_ids_ordered,
                     default=[aid for aid in known_ids_ordered
                              if any(t[0] == aid.upper() for t in current_aids)],
-                    format_func=lambda aid: (
+                    format_func=lambda aid: (get_project_from_wbs(
+                        next((e.get("wbs_id","") for e in entries
+                              if e["activity_id"].upper() == aid.upper()), "")
+                    ))+" "+(
                         known_map.get(
                             (aid.upper(), get_project_from_wbs(
                                 next((e.get("wbs_id","") for e in entries
@@ -2573,15 +2995,17 @@ if "photos" in tab_index:
             st.info("No photos uploaded yet.")
         else:
             # Filter controls
-            _sel_project = st.session_state.get("selected_project", "— All Projects —")
+            _sel_project = st.session_state.get("selected_project", "")
+            _accessible_photo_projs = get_accessible_projects(
+                st.session_state.get("username", ""), get_all_projects(entries)
+            )
             f_col0, f_col1, f_col2 = st.columns([2, 2, 3])
             with f_col0:
-                # Project filter — restricts which activity IDs are shown
-                _photo_projects = ["— All Projects —"] + get_all_projects(entries)
                 _photo_proj = st.selectbox(
                     "Filter by Project",
-                    options=_photo_projects,
-                    index=_photo_projects.index(_sel_project) if _sel_project in _photo_projects else 0,
+                    options=_accessible_photo_projs,
+                    index=_accessible_photo_projs.index(_sel_project)
+                          if _sel_project in _accessible_photo_projs else 0,
                     key="photo_filter_project",
                 )
             with f_col1:
@@ -2589,7 +3013,7 @@ if "photos" in tab_index:
                 # filtered to the selected project
                 _project_aids = {
                     e["activity_id"] for e in filter_by_project(entries, _photo_proj)
-                } if _photo_proj != "— All Projects —" else None
+                } if _photo_proj else None
                 assigned_aids = sorted({
                     a["activity_id"] for a in assignments
                     if (_project_aids is None or a["activity_id"] in _project_aids)
@@ -2607,7 +3031,7 @@ if "photos" in tab_index:
                 ).strip().lower()
 
             # Apply filters
-            if _photo_proj != "— All Projects —" and _project_aids is not None:
+            if _photo_proj and _project_aids is not None:
                 # Find all photo IDs assigned to any activity in this project
                 _proj_pids = {
                     a["photo_id"] for a in assignments
@@ -2629,7 +3053,7 @@ if "photos" in tab_index:
             if filter_text:
                 filtered = [p for p in filtered
                             if filter_text in p.get("comment", "").lower()
-                            or any(filter_text in aid.lower()
+                            or any(filter_text in (aid[0] if isinstance(aid, tuple) else aid).lower()
                                    for aid in photo_to_aids.get(p["id"], []))]
 
             filtered = sorted(filtered, key=lambda p: p["photo_date"], reverse=True)
@@ -2750,6 +3174,73 @@ if "settings" in tab_index:
         st.subheader("⚙️ Settings")
         st.caption("Admin-only configuration options.")
 
+        # ── Notifications inbox ───────────────────────────────────────────
+        st.markdown("### 🔔 Notifications")
+        _all_notifs_raw = load_notifications()
+        _username       = st.session_state.get("username","")
+        # Only show notifications addressed to this user
+        _all_notifs = [
+            n for n in _all_notifs_raw
+            if not n.get("recipients") or _username in n.get("recipients", [])
+        ]
+
+        if not _all_notifs:
+            st.info("No notifications yet.")
+        else:
+            _unread_ids = {n["id"] for n in _all_notifs if _username not in n.get("read_by",[])}
+            st.caption(f"{len(_all_notifs)} total  ·  {len(_unread_ids)} unread")
+
+            # Table header
+            _th1, _th2, _th3, _th4, _th5 = st.columns([3, 2, 2, 1, 1])
+            _th1.caption("**Title**")
+            _th2.caption("**From**")
+            _th3.caption("**Date**")
+            _th4.caption("**Read**")
+            _th5.caption("**Delete**")
+            st.divider()
+
+            for notif in reversed(_all_notifs):
+                _is_unread = notif["id"] in _unread_ids
+                _tc1, _tc2, _tc3, _tc4, _tc5 = st.columns([3, 2, 2, 1, 1])
+
+                with _tc1:
+                    prefix = "🔵 " if _is_unread else ""
+                    st.write(f"{prefix}{notif['title']}")
+                    if notif.get("project"):
+                        st.caption(notif["project"])
+                    with st.expander("Details"):
+                        if notif.get("body"):
+                            st.write(notif["body"])
+                        if notif.get("rows"):
+                            import pandas as _pd
+                            st.dataframe(
+                                _pd.DataFrame(notif["rows"]),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                _tc2.write(notif.get("created_by", "—"))
+                _tc3.write(notif.get("created_at", "—"))
+
+                with _tc4:
+                    if _is_unread:
+                        if st.button("✓", key=f"notif_read_{notif['id']}",
+                                     help="Mark as read"):
+                            mark_notification_read(notif["id"], _username)
+                            st.rerun()
+                    else:
+                        st.write("✅")
+
+                with _tc5:
+                    if st.button("🗑", key=f"notif_del_{notif['id']}",
+                                 help="Delete"):
+                        delete_notification(notif["id"])
+                        st.rerun()
+
+                st.divider()
+
+        st.divider()
+
         # ── Rename Project ────────────────────────────────────────────────
         st.markdown("### Rename Project")
         st.write(
@@ -2761,6 +3252,156 @@ if "settings" in tab_index:
         _settings_entries = load_entries()
         _settings_projects = get_all_projects(_settings_entries)
         _named_projects = [p for p in _settings_projects if p != "(Unassigned)"]
+
+        # ── Tab Visibility ────────────────────────────────────────────────
+        st.markdown("### Tab Visibility")
+        st.write(
+            "Control which tabs are visible per role and per user. "
+            "Role settings apply to all users of that role. "
+            "User overrides take precedence. "
+            "The **Developer** role always sees all tabs."
+        )
+        st.caption("Tabs can only be hidden here — not granted beyond what the role's permissions allow.")
+
+        _tv = load_tab_visibility()
+        _tv_changed = False
+
+        _TAB_LABELS = {
+            "view":     "📋 View All Entries",
+            "submit":   "📝 Submit / Update",
+            "import":   "📤 Import from Excel",
+            "export":   "📥 Export to Excel",
+            "photos":   "📸 Photo Log",
+            "settings": "⚙️ Settings",
+            "sitewalk": " Site Walk",
+        }
+        _PERM_ORDER = ["view","submit","import","export","photos","settings","sitewalk"]
+
+        # Role defaults
+        with st.expander("Role defaults", expanded=False):
+            st.caption("Hide tabs for an entire role. Developer always sees all.")
+            for _role in ("viewer","engineer","admin"):
+                st.write(f"**{ROLE_LABEL.get(_role,_role)}**")
+                _role_perms = PERMISSIONS.get(_role, set())
+                _role_vis   = _tv.get("roles",{}).get(_role,{})
+                _r_tabs = [p for p in _PERM_ORDER if p in _role_perms]
+                _rcols  = st.columns(min(len(_r_tabs), 4))
+                for _ci, _perm in enumerate(_r_tabs):
+                    with _rcols[_ci % 4]:
+                        _cur = _role_vis.get(_perm, True)
+                        _new = st.checkbox(
+                            _TAB_LABELS.get(_perm, _perm), value=_cur,
+                            key=f"tv_role_{_role}_{_perm}",
+                        )
+                        if _new != _cur:
+                            _tv.setdefault("roles",{}).setdefault(_role,{})[_perm] = _new
+                            _tv_changed = True
+
+        # User overrides
+        with st.expander("User overrides", expanded=False):
+            st.caption("Override tab visibility for a specific user, overriding the role default.")
+            _override_user = st.selectbox(
+                "Select user",
+                options=list(USERS.keys()),
+                format_func=lambda u: (
+                    f"{u}  —  {USERS[u]['name']} "
+                    f"({ROLE_LABEL.get(USERS[u]['role'], USERS[u]['role'])})"
+                ),
+                key="tv_user_select",
+            )
+            _u_role  = USERS[_override_user]["role"]
+            _u_perms = PERMISSIONS.get(_u_role, set())
+            _u_vis   = _tv.get("users",{}).get(_override_user,{})
+            st.write(f"**{USERS[_override_user]['name']}** — {ROLE_LABEL.get(_u_role,_u_role)}")
+
+            _perm_list = [p for p in _PERM_ORDER if p in _u_perms]
+            _h1, _h2, _h3 = st.columns([3,1,1])
+            _h1.caption("Tab"); _h2.caption("Role default"); _h3.caption("Override")
+
+            for _perm in _perm_list:
+                _c1, _c2, _c3 = st.columns([3,1,1])
+                _role_default = _tv.get("roles",{}).get(_u_role,{}).get(_perm, True)
+                _has_override = _perm in _u_vis
+                _c1.write(_TAB_LABELS.get(_perm, _perm))
+                _c2.write("✅" if _role_default else "❌")
+                _use_override = _c3.checkbox(
+                    "Override", value=_has_override,
+                    key=f"tv_uo_{_override_user}_{_perm}",
+                    label_visibility="collapsed",
+                )
+                if _use_override:
+                    _ov = st.checkbox(
+                        f"Show tab",
+                        value=_u_vis.get(_perm, _role_default),
+                        key=f"tv_uv_{_override_user}_{_perm}",
+                    )
+                    if _ov != _u_vis.get(_perm) or not _has_override:
+                        _tv.setdefault("users",{}).setdefault(_override_user,{})[_perm] = _ov
+                        _tv_changed = True
+                elif _has_override:
+                    _tv.get("users",{}).get(_override_user,{}).pop(_perm, None)
+                    _tv_changed = True
+
+        if _tv_changed:
+            save_tab_visibility(_tv)
+            st.success("Tab visibility saved.")
+
+        st.divider()
+
+        # ── Report Dates overview ─────────────────────────────────────────
+        st.markdown("### Report Dates")
+        st.write(
+            "Report dates are set per-project in the sidebar. "
+            "This table shows the current state across all projects."
+        )
+        _settings_proj_settings = load_project_settings()
+        _all_named = [p for p in get_all_projects(load_entries()) if p != "(Unassigned)"]
+        if not _all_named:
+            st.info("No named projects yet.")
+        else:
+            for _proj in _all_named:
+                _rd = _settings_proj_settings.get(_proj, {}).get("report_date")
+                _rd_str = datetime.strptime(_rd, "%Y-%m-%d").strftime("%d/%m/%Y") if _rd else "— not set —"
+                st.write(f"- **{_proj}:** {_rd_str}")
+
+        st.divider()
+        # Project access management — developer only
+        # (admin can see but not edit; developer can assign)
+        st.markdown("### Project Access")
+        st.write(
+            "Control which users can access each project. "
+            "If no users are selected for a project, **all users** can access it. "
+            "Select specific users to restrict access to only those users."
+        )
+
+        _access_proj_settings = load_project_settings()
+        _all_usernames = list(USERS.keys())
+
+        if not _all_named:
+            st.info("No named projects yet.")
+        else:
+            for _proj in _all_named:
+                with st.expander(f"📁  {_proj}", expanded=False):
+                    _current_allowed = _access_proj_settings.get(_proj, {}).get("allowed_users", [])
+                    _new_allowed = st.multiselect(
+                        "Allowed users (empty = all users)",
+                        options=_all_usernames,
+                        default=[u for u in _current_allowed if u in _all_usernames],
+                        format_func=lambda u: f"{u}  —  {USERS[u]['name']} · {ROLE_LABEL.get(USERS[u]['role'], USERS[u]['role'])}",
+                        key=f"access_{_proj}",
+                    )
+                    if st.button("💾  Save access", key=f"access_save_{_proj}",
+                                disabled=not has_permission("manage_users")):
+                        set_allowed_users(_proj, _new_allowed)
+                        if _new_allowed:
+                            st.success(
+                                f"Access restricted to: {', '.join(USERS[u]['name'] for u in _new_allowed)}"
+                            )
+                        else:
+                            st.success("Access open to all users.")
+
+        st.divider()
+        st.markdown("### Rename Project")
 
         if not _named_projects:
             st.info("No named projects found. Projects are identified by the "
@@ -2839,3 +3480,457 @@ if "settings" in tab_index:
                             f"{n} {'activity' if n == 1 else 'activities'} updated."
                         )
                         st.rerun()
+
+        st.divider()
+        st.markdown("### Delete Project")
+        st.write(
+            "Permanently deletes all activities belonging to a project. "
+            "Photo assignments for those activities are also removed. "
+            "The image files themselves are kept."
+        )
+
+        if not _named_projects:
+            st.info("No named projects to delete.")
+        else:
+            del_proj = st.selectbox(
+                "Project to delete",
+                options=_named_projects,
+                key="settings_delete_proj",
+            )
+
+            _del_affected = [e for e in _settings_entries
+                             if get_project_from_wbs(e.get("wbs_id","")) == del_proj]
+            st.warning(
+                f"⚠️ This will permanently delete **{len(_del_affected)}** "
+                f"{'activity' if len(_del_affected) == 1 else 'activities'} "
+                f"and all their associated data (comments, photo assignments). "
+                f"**This cannot be undone.**"
+            )
+
+            if _del_affected:
+                with st.expander("Show activities that will be deleted"):
+                    for e in _del_affected:
+                        st.caption(
+                            f"`{e['activity_id']}`  {e['activity_name']}  "
+                            f"WBS: {e.get('wbs_id','')}"
+                        )
+
+            # Two-step confirmation — user must type the project name
+            _del_confirm_text = st.text_input(
+                f'Type **{del_proj}** to confirm deletion',
+                placeholder=del_proj,
+                key="settings_delete_confirm_text",
+            ).strip()
+
+            if st.button(
+                f"🗑  Delete project {del_proj}",
+                type="primary",
+                key="settings_delete_confirm_btn",
+                disabled=(_del_confirm_text != del_proj),
+            ):
+                # Remove all activities for this project
+                _del_aids = {e["activity_id"].upper() for e in _del_affected}
+                surviving = [e for e in _settings_entries
+                             if get_project_from_wbs(e.get("wbs_id","")) != del_proj]
+                save_entries(surviving)
+
+                # Remove photo assignments for deleted activities
+                assignments = load_assignments()
+                surviving_asgn = [
+                    a for a in assignments
+                    if not (a["activity_id"].upper() in _del_aids
+                            and get_project_from_wbs(a.get("wbs_id","")) == del_proj)
+                ]
+                if len(surviving_asgn) != len(assignments):
+                    save_assignments(surviving_asgn)
+
+                # Remove report date setting for this project
+                _del_proj_settings = load_project_settings()
+                if del_proj in _del_proj_settings:
+                    del _del_proj_settings[del_proj]
+                    save_project_settings(_del_proj_settings)
+
+                # Reset sidebar project selection if it was pointing at deleted project
+                if st.session_state.get("selected_project") == del_proj:
+                    st.session_state["selected_project"] = ""
+
+                # Invalidate photo assignment caches
+                for _k in ("photo_assignments","photo_to_aids","aid_to_pids","_assign_sig"):
+                    st.session_state.pop(_k, None)
+
+                st.success(
+                    f"Project **{del_proj}** deleted — "
+                    f"{len(_del_affected)} activities removed."
+                )
+                st.rerun()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: SITE WALK
+# ══════════════════════════════════════════════════════════════════════════════
+# Shows all In Progress activities + Not Started activities whose predicted
+# start is on or before today.  The user reviews each one, edits fields, and
+# saves everything in a single commit at the end.
+
+if "sitewalk" in tab_index:
+    with tab_index["sitewalk"]:
+        _sel_project = st.session_state.get("selected_project", "")
+        _rpt_date_sw = get_report_date(_sel_project) if _sel_project else None
+        _today       = date.today()
+
+        st.subheader(" Site Walk")
+        _last_walk_date = get_last_walk_date(_sel_project) if _sel_project else None
+        st.caption(
+            f"Project: **{_sel_project or '—'}**"
+            + (f"  ·  Report date: **{_rpt_date_sw.strftime('%d/%m/%Y')}**"
+               if _rpt_date_sw else "  ·  ⚠️ No report date set — set one in the sidebar.")
+            + (f"  ·  Last walk: **{_last_walk_date.strftime('%d/%m/%Y')}**"
+               if _last_walk_date else "  ·  Last walk: **—**")
+        )
+
+        # ── Start / Reset walk ────────────────────────────────────────────────
+        walk_active = st.session_state.get("sw_active", False)
+
+        if not walk_active:
+            st.write(
+                "Press **Start Walk** to load all activities that need reviewing — "
+                "In Progress activities and any Not Started activities whose "
+                "predicted start is on or before today."
+            )
+            if st.button("▶️  Start Walk", type="primary"):
+                all_entries = load_entries()
+                project_entries = filter_by_project(all_entries, _sel_project)
+
+                # Collect qualifying activities — Task Dependent type only
+                sw_activities = []
+                for e in project_entries:
+                    if e.get("task_type", "") != "Task Dependent":
+                        continue
+                    status = e.get("activity_status", "")
+                    if status == "In Progress":
+                        sw_activities.append(e.copy())
+                    elif status == "Not Started":
+                        pred = e.get("predicted_start", "")
+                        if pred:
+                            pd = iso_to_dt(pred)
+                            if pd and pd.date() <= _today:
+                                sw_activities.append(e.copy())
+
+                if not sw_activities:
+                    st.info(
+                        "No activities require review — no In Progress activities "
+                        "and no Not Started activities with a predicted start on or before today."
+                    )
+                else:
+                    # Initialise walk state
+                    st.session_state["sw_active"]     = True
+                    st.session_state["sw_activities"] = sw_activities
+                    st.session_state["sw_edits"]      = {}   # activity_id → edited fields
+                    st.rerun()
+
+        else:
+            sw_activities = st.session_state.get("sw_activities", [])
+            sw_edits      = st.session_state.get("sw_edits", {})
+
+            # ── Sort + search controls ────────────────────────────────────────
+            ctl_col1, ctl_col2, ctl_col3 = st.columns([2, 2, 1])
+            with ctl_col1:
+                sw_search = st.text_input(
+                    "Search",
+                    placeholder="Activity ID or name…",
+                    key="sw_search",
+                ).strip().lower()
+            with ctl_col2:
+                sw_sort = st.selectbox(
+                    "Sort by",
+                    ["WBS Code", "Activity ID"],
+                    key="sw_sort",
+                )
+            with ctl_col3:
+                sw_asc = st.radio(
+                    "Order", ["↑ Asc", "↓ Desc"],
+                    key="sw_order", horizontal=True,
+                ) == "↑ Asc"
+
+            # Filter
+            visible_acts = [
+                a for a in sw_activities
+                if not sw_search
+                or sw_search in a.get("activity_id","").lower()
+                or sw_search in a.get("activity_name","").lower()
+            ]
+
+            # Sort
+            def _sw_wbs_key(e):
+                segs = []
+                for p in str(e.get("wbs_id","") or "").split("."):
+                    try:    segs.append((0, int(p)))
+                    except: segs.append((1, p.lower()))
+                return segs or [(1,"")]
+
+            if sw_sort == "WBS Code":
+                visible_acts = sorted(visible_acts, key=_sw_wbs_key, reverse=not sw_asc)
+            else:
+                visible_acts = sorted(visible_acts,
+                                      key=lambda e: e.get("activity_id","").upper(),
+                                      reverse=not sw_asc)
+
+            st.caption(
+                f"Showing **{len(visible_acts)}** of **{len(sw_activities)}** activities"
+                + (f" — {len(sw_edits)} edited" if sw_edits else "")
+            )
+            st.divider()
+
+            if not visible_acts:
+                st.info("No activities match the search.")
+
+            # ── Per-activity edit forms ───────────────────────────────────────
+            for act in visible_acts:
+                aid    = act["activity_id"]
+                # Merge any already-saved edits back in for display
+                merged = {**act, **sw_edits.get(aid, {})}
+
+                status_colour = STATUS_COLOUR.get(merged.get("activity_status",""), "#6b7280")
+                _is_staged = aid in sw_edits
+                with st.container(border=True):
+                    # Header — show persistent staged indicator if reviewed
+                    h_left, h_right = st.columns([4, 1])
+                    with h_left:
+                        st.write(f"**`{aid}`**  {merged.get('activity_name','')}")
+                        st.caption(f"WBS: {merged.get('wbs_id','—')}")
+                    with h_right:
+                        if _is_staged:
+                            st.success("✅ Staged")
+                        else:
+                            st.write(merged.get("activity_status",""))
+
+                    # Edit form
+                    new_status = st.selectbox(
+                        "Status",
+                        STATUS_OPTIONS,
+                        index=STATUS_OPTIONS.index(merged.get("activity_status","Not Started"))
+                              if merged.get("activity_status") in STATUS_OPTIONS else 0,
+                        key=f"sw_status_{aid}",
+                    )
+
+                    sw_start_dt = sw_finish_dt = None
+                    sw_pct = 0
+                    sw_rem = st.text_input(
+                        "Remaining Duration (days) *",
+                        value=str(merged.get("remaining_dur","") or ""),
+                        placeholder="e.g. 5",
+                        key=f"sw_rem_{aid}",
+                        ).strip()
+
+                    if new_status == "Not Started":
+                        st.info("% Complete and Remaining Duration set to 0 automatically.", icon="ℹ️")
+
+                    elif new_status == "In Progress":
+                        sw_start_dt = datetime_inputs(
+                            "Actual Start *", key=f"sw_start_{aid}", required=True,
+                            default_dt=iso_to_dt(merged.get("actual_start","")),
+                        )
+                        c_p, c_r = st.columns(2)
+                        with c_r:
+                            sw_rem = st.text_input(
+                                "Remaining Duration (days) *",
+                                value=str(merged.get("remaining_dur","") or ""),
+                                placeholder="e.g. 5",
+                                key=f"sw_rem_{aid}",
+                            ).strip()
+
+                        # Suggested pct from report date
+                        _sw_suggested = None
+                        if _rpt_date_sw and sw_rem and sw_start_dt:
+                            _sw_ef = expected_finish_date(_rpt_date_sw, sw_rem)
+                            if _sw_ef:
+                                _sw_suggested = calc_duration_pct(
+                                    dt_to_iso(sw_start_dt), _sw_ef, _rpt_date_sw
+                                )
+                        with c_p:
+                            _sw_pct_default = _sw_suggested if _sw_suggested is not None else \
+                                              int(merged.get("pct_complete") or 0)
+                            sw_pct = st.number_input(
+                                "Duration % Complete *",
+                                min_value=0, max_value=99, step=5,
+                                value=_sw_pct_default,
+                                key=f"sw_pct_{aid}",
+                            )
+                            if _sw_suggested is not None:
+                                st.caption(f"💡 Calculated: **{_sw_suggested}%**")
+
+                    elif new_status == "Completed":
+                        sw_start_dt = datetime_inputs(
+                            "Actual Start *", key=f"sw_start_{aid}", required=True,
+                            default_dt=iso_to_dt(merged.get("actual_start","")),
+                        )
+                        sw_finish_dt = datetime_inputs(
+                            "Actual Finish *", key=f"sw_finish_{aid}", required=True,
+                            default_dt=iso_to_dt(merged.get("actual_finish","")),
+                        )
+                        sw_pct = 100
+                        sw_rem = "0"
+                        st.info("% Complete set to 100, Remaining to 0.", icon="✅")
+
+                    # Comments
+                    with st.expander("💬  Comments"):
+                        _sw_existing_cmts = merged.get("_comments", [])
+                        if _sw_existing_cmts:
+                            for c in _sw_existing_cmts:
+                                st.write(f"**{c['at']}** — {c['by']}")
+                                st.write(c["text"])
+                                st.divider()
+                        sw_new_cmt = st.text_area(
+                            "Add comment",
+                            placeholder="Enter progress notes...",
+                            height=80,
+                            key=f"sw_comment_{aid}",
+                            label_visibility="collapsed",
+                        ).strip()
+
+                    # Mark as reviewed button — stages changes to sw_edits
+                    if st.button(f"✅  Mark reviewed", key=f"sw_review_{aid}"):
+                        # Validate
+                        errs = []
+                        if new_status in ("In Progress","Completed") and not sw_start_dt:
+                            errs.append("Actual Start is required.")
+                        if new_status == "Completed" and not sw_finish_dt:
+                            errs.append("Actual Finish is required.")
+                        if new_status == "In Progress" and not sw_rem:
+                            errs.append("Remaining Duration is required.")
+                        if sw_start_dt and sw_finish_dt and sw_finish_dt < sw_start_dt:
+                            errs.append("Actual Finish cannot be before Actual Start.")
+
+                        if errs:
+                            for err in errs:
+                                st.error(err)
+                        else:
+                            # Build updated comments
+                            upd_cmts = list(merged.get("_comments", []))
+                            if sw_new_cmt:
+                                upd_cmts.insert(0, {
+                                    "text": sw_new_cmt,
+                                    "by":   st.session_state.display_name,
+                                    "at":   datetime.now().strftime("%d/%m/%Y %H:%M"),
+                                })
+
+                            sw_edits[aid] = {
+                                "activity_status": new_status,
+                                "actual_start":    dt_to_iso(sw_start_dt)  if sw_start_dt  else "",
+                                "actual_finish":   dt_to_iso(sw_finish_dt) if sw_finish_dt else "",
+                                "pct_complete":    str(sw_pct),
+                                "remaining_dur":   sw_rem,
+                                "_comments":       upd_cmts,
+                                "_submitted_at":   datetime.now().strftime("%d/%m/%Y %H:%M"),
+                                "_submitted_by":   st.session_state.display_name,
+                            }
+                            st.session_state["sw_edits"] = sw_edits
+                            st.rerun()
+
+            # ── Add activity outside filtered list ───────────────────────────
+            st.divider()
+            with st.expander("🔍  Add an activity outside the walk list"):
+                st.caption(
+                    "Search for any activity in this project by name or ID "
+                    "and add it to the walk for review."
+                )
+                all_project_entries = filter_by_project(load_entries(), _sel_project)
+                sw_current_ids      = {a["activity_id"] for a in sw_activities}
+
+                add_search = st.text_input(
+                    "Search",
+                    placeholder="Activity ID or name…",
+                    key="sw_add_search",
+                ).strip().lower()
+
+                if add_search:
+                    candidates = [
+                        e for e in all_project_entries
+                        if e["activity_id"] not in sw_current_ids
+                        and (add_search in e.get("activity_id","").lower()
+                             or add_search in e.get("activity_name","").lower())
+                    ]
+                    if not candidates:
+                        st.caption("No matching activities found outside the current walk list.")
+                    else:
+                        for cand in candidates[:20]:
+                            c_info, c_btn = st.columns([5, 1])
+                            with c_info:
+                                st.write(
+                                    f"**`{cand['activity_id']}`**  {cand['activity_name']}  "
+                                    f"— WBS: {cand.get('wbs_id','—')}  "
+                                    f"— {cand.get('activity_status','')}"
+                                )
+                            with c_btn:
+                                if st.button("Add", key=f"sw_add_{cand['activity_id']}"):
+                                    sw_activities.append(cand.copy())
+                                    st.session_state["sw_activities"] = sw_activities
+                                    st.toast(
+                                        f"Added {cand['activity_id']} to walk."
+                                    )
+                                    st.rerun()
+                        if len(candidates) > 20:
+                            st.caption(f"… and {len(candidates)-20} more — refine your search.")
+
+            # ── Commit + Cancel controls ──────────────────────────────────────
+            st.divider()
+            n_edited = len(sw_edits)
+            n_total  = len(sw_activities)
+
+            commit_col, cancel_col = st.columns([2, 1])
+
+            with commit_col:
+                st.info(
+                    f"**{n_edited}** of **{n_total}** activities reviewed and staged."
+                    + (" Press **Complete Walk** to save all changes."
+                       if n_edited else " Mark activities as reviewed above.")
+                )
+                if st.button(
+                    f"💾  Complete Walk ({n_edited} updates)",
+                    type="primary",
+                    disabled=(n_edited == 0),
+                    key="sw_commit",
+                ):
+                    all_entries  = load_entries()
+                    saved_count  = 0
+                    for idx, entry in enumerate(all_entries):
+                        if entry.get("activity_id") in sw_edits:
+                            all_entries[idx] = {**entry, **sw_edits[entry["activity_id"]]}
+                            saved_count += 1
+                    save_entries(all_entries)
+                    set_last_walk_date(_sel_project, _today)
+
+                    # Build and fire notification for admin inbox
+                    _notif_rows = []
+                    for _eid, _edata in sw_edits.items():
+                        _orig = next((e for e in sw_activities if e["activity_id"] == _eid), {})
+                        _notif_rows.append({
+                            "Activity ID":      _eid,
+                            "Activity Name":    _orig.get("activity_name",""),
+                            "Status":           _edata.get("activity_status","—"),
+                            "% Complete":       _edata.get("pct_complete","—"),
+                            "Remaining (days)": _edata.get("remaining_dur","—"),
+                            "Actual Start":     display_dt(_edata.get("actual_start","")),
+                            "Actual Finish":    display_dt(_edata.get("actual_finish","")),
+                        })
+                    create_notification(
+                        created_by = st.session_state.display_name,
+                        project    = _sel_project,
+                        title      = f"Site Walk — {_sel_project} — {_today.strftime('%d/%m/%Y')}",
+                        body       = (
+                            f"Walk completed by **{st.session_state.display_name}**"
+                            f" on {_today.strftime('%d/%m/%Y')}."
+                        ),
+                        rows       = _notif_rows,
+                    )
+
+                    for _k in ("sw_active", "sw_activities", "sw_edits"):
+                        st.session_state.pop(_k, None)
+
+                    st.success(f"✅ Walk complete — {saved_count} activities updated.")
+                    st.rerun()
+
+            with cancel_col:
+                if st.button("✖️  Cancel Walk", key="sw_cancel"):
+                    for _k in ("sw_active", "sw_activities", "sw_edits"):
+                        st.session_state.pop(_k, None)
+                    st.rerun()
