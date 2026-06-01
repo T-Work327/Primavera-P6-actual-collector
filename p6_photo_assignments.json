@@ -1,0 +1,58 @@
+[
+  {
+    "photo_id": "74b5d36707ea4c2db821bb9d528c4fd4",
+    "activity_id": "163",
+    "assigned_at": "27/03/2026 08:52",
+    "assigned_by": "Administrator"
+  },
+  {
+    "photo_id": "74b5d36707ea4c2db821bb9d528c4fd4",
+    "activity_id": "SITE-1040",
+    "assigned_at": "27/03/2026 08:59",
+    "assigned_by": "Administrator"
+  },
+  {
+    "photo_id": "0615853b139044239662b2dd7335dace",
+    "activity_id": "1FL-1100",
+    "assigned_at": "27/03/2026 09:00",
+    "assigned_by": "Administrator"
+  },
+  {
+    "photo_id": "d54ecb9128354744989921a3dae83085",
+    "activity_id": "ROOF-1000",
+    "assigned_at": "27/03/2026 09:01",
+    "assigned_by": "Administrator"
+  },
+  {
+    "photo_id": "e5d03078cb304c3a8de9a6eec4e903b8",
+    "activity_id": "ROOF-1000",
+    "assigned_at": "27/03/2026 09:02",
+    "assigned_by": "Administrator"
+  },
+  {
+    "photo_id": "592865da9f1043209094c549a14f74d1",
+    "activity_id": "1FL-1100",
+    "assigned_at": "27/03/2026 09:06",
+    "assigned_by": "Administrator"
+  },
+  {
+    "photo_id": "4c5cff6b4cb4486fbe8e5b76e0ac85ec",
+    "activity_id": "2FL-1150",
+    "assigned_at": "27/03/2026 09:07",
+    "assigned_by": "Administrator"
+  },
+  {
+    "photo_id": "26e59ccfeaa8451d8f77d33922d24e79",
+    "activity_id": "SS-1040",
+    "wbs_id": "4024208-2.01.82",
+    "assigned_at": "30/04/2026 22:14",
+    "assigned_by": "Administrator"
+  },
+  {
+    "photo_id": "5bd524c184a94b24b4b219a6a0628212",
+    "activity_id": "PROC-FD-1090",
+    "wbs_id": "4024208-2.03.06.122.126",
+    "assigned_at": "08/05/2026 10:48",
+    "assigned_by": "Administrator"
+  }
+]

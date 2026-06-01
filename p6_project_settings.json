@@ -1,0 +1,29 @@
+{
+  "AAM-Phase 4 Master Schedule 12-19-2 - B3": {
+    "report_date": "2026-05-14",
+    "data_date": "2026-02-26",
+    "allowed_users": [
+      "engineer",
+      "developer",
+      "admin2"
+    ],
+    "last_walk_date": "2026-06-01"
+  },
+  "4024208-2": {
+    "data_date": "2026-02-26",
+    "allowed_users": [
+      "admin",
+      "engineer2",
+      "developer"
+    ],
+    "report_date": "2026-05-14"
+  },
+  "4024208-3": {
+    "allowed_users": [
+      "admin",
+      "engineer2",
+      "developer"
+    ],
+    "report_date": "2026-05-14"
+  }
+}

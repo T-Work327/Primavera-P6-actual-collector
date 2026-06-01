@@ -1,0 +1,11 @@
+{
+  "roles": {
+    "engineer": {
+      "view": false,
+      "import": false
+    },
+    "admin": {
+      "sitewalk": false
+    }
+  }
+}

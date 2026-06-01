@@ -1,0 +1,252 @@
+[
+  {
+    "id": "565d02d9664342ddbd60a48a16944260",
+    "created_at": "01/06/2026 09:19",
+    "created_by": "Site Engineer",
+    "project": "AAM-Phase 4 Master Schedule 12-19-2 - B3",
+    "title": "Site Walk — AAM-Phase 4 Master Schedule 12-19-2 - B3 — 01/06/2026",
+    "body": "Walk completed by **Site Engineer** on 01/06/2026.",
+    "rows": [
+      {
+        "Activity ID": "P&B-1070",
+        "Activity Name": "AMA issues \"For Construction\" Drawings & Specifications",
+        "Status": "In Progress",
+        "% Complete": "0",
+        "Remaining (days)": "3",
+        "Actual Start": "01/06/2026 08:00",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "ELEV-1000",
+        "Activity Name": "Material Lift Leadtime",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "DG-1000",
+        "Activity Name": "IFAB Shop Drawings Approvals & Leadtimes",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "DG-1030",
+        "Activity Name": "Metal Panel Breaking",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "SITE-1000",
+        "Activity Name": "Shop Drawings and Approvals",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "ELEC-1000",
+        "Activity Name": "Electrical Panels Leadtime",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "ELEC-1020",
+        "Activity Name": "Mainswitchgear MSB and Busway Installation",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "ELEC-1010",
+        "Activity Name": "Mainswitchgear MSB and Busway Delivery",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "GAR-1000",
+        "Activity Name": "MEP's",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "GAR-1010",
+        "Activity Name": "Entrance Framing / Drywall",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "GAR-1020",
+        "Activity Name": "Entrance Flatwork",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "GAR-1030",
+        "Activity Name": "Paint",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      }
+    ],
+    "recipients": [
+      "admin2",
+      "developer"
+    ],
+    "read_by": [
+      "admin2"
+    ]
+  },
+  {
+    "id": "d649c362d5a641fc8b51766df816743f",
+    "created_at": "01/06/2026 09:34",
+    "created_by": "Site Engineer",
+    "project": "AAM-Phase 4 Master Schedule 12-19-2 - B3",
+    "title": "Site Walk — AAM-Phase 4 Master Schedule 12-19-2 - B3 — 01/06/2026",
+    "body": "Walk completed by **Site Engineer** on 01/06/2026.",
+    "rows": [
+      {
+        "Activity ID": "P&B-1070",
+        "Activity Name": "AMA issues \"For Construction\" Drawings & Specifications",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "25",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "ELEV-1000",
+        "Activity Name": "Material Lift Leadtime",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "90",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "DG-1000",
+        "Activity Name": "IFAB Shop Drawings Approvals & Leadtimes",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "20",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "DG-1030",
+        "Activity Name": "Metal Panel Breaking",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "30",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "SITE-1000",
+        "Activity Name": "Shop Drawings and Approvals",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "40",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "ELEC-1000",
+        "Activity Name": "Electrical Panels Leadtime",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "200",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "ELEC-1020",
+        "Activity Name": "Mainswitchgear MSB and Busway Installation",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "30",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "ELEC-1010",
+        "Activity Name": "Mainswitchgear MSB and Busway Delivery",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "24",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "GAR-1000",
+        "Activity Name": "MEP's",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "35",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "GAR-1010",
+        "Activity Name": "Entrance Framing / Drywall",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "20",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "GAR-1020",
+        "Activity Name": "Entrance Flatwork",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "20",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      },
+      {
+        "Activity ID": "GAR-1030",
+        "Activity Name": "Paint",
+        "Status": "Not Started",
+        "% Complete": "0",
+        "Remaining (days)": "10",
+        "Actual Start": "—",
+        "Actual Finish": "—"
+      }
+    ],
+    "recipients": [
+      "admin2",
+      "developer"
+    ],
+    "read_by": [
+      "admin2"
+    ]
+  }
+]
