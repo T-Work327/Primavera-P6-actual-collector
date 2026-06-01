@@ -3714,16 +3714,16 @@ if "sitewalk" in tab_index:
 
                     sw_start_dt = sw_finish_dt = None
                     sw_pct = 0
-                    sw_rem = st.text_input(
-                        "Remaining Duration (days) *",
-                        value=str(merged.get("remaining_dur","") or ""),
-                        placeholder="e.g. 5",
-                        key=f"sw_rem_{aid}",
-                        ).strip()
+                    sw_rem = 0
 
                     if new_status == "Not Started":
                         st.info("% Complete and Remaining Duration set to 0 automatically.", icon="ℹ️")
-
+                        sw_rem = st.text_input(
+                            "Remaining Duration (days) *",
+                            value=str(merged.get("remaining_dur","") or ""),
+                            placeholder="e.g. 5",
+                            key=f"sw_rem_{aid}",
+                            ).strip()
                     elif new_status == "In Progress":
                         sw_start_dt = datetime_inputs(
                             "Actual Start *", key=f"sw_start_{aid}", required=True,
