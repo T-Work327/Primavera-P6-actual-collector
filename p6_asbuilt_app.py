@@ -30,7 +30,7 @@ import json
 import uuid
 import zipfile
 import bcrypt
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import streamlit as st
@@ -118,6 +118,7 @@ ASSIGN_FILE   = Path("p6_photo_assignments.json")
 PROJ_SETTINGS  = Path("p6_project_settings.json")
 NOTIF_FILE     = Path("p6_notifications.json")
 TAB_VIS_FILE   = Path("p6_tab_visibility.json")
+LOOKAHEADDAYS= 14
 
 USER_DATA = "DurationQtyType=QT_Day\nShowAsPercentage=0\nSmallScaleQtyType=QT_Hour\nDateFormat=dd/mm/yyyy\nCurrencyFormat=US Dollar"
 
@@ -942,22 +943,50 @@ def get_project_admin_recipients(project: str) -> list[str]:
 
 def create_notification(created_by: str, project: str, title: str, body: str,
                         recipients: list[str] | None = None,
-                        rows: list[dict] | None = None) -> None:
-    """Create a notification. rows is an optional list of dicts shown as a table."""
+                        rows: list[dict] | None = None,
+                        status: str = "info",
+                        edits: dict | None = None,
+                        rejection_note: str = "") -> str:
+    """
+    Create a notification. Returns the new notification's id.
+
+    status:
+      "info"      — plain notification, no action needed (default)
+      "pending"   — awaiting admin approval; edits holds the proposed changes
+      "approved"  — approved and applied
+      "rejected"  — rejected and sent back to the engineer with a note
+
+    rows is an optional list of dicts shown as a table.
+    edits is the activity_id -> field-changes dict awaiting approval.
+    """
     if recipients is None:
         recipients = get_project_admin_recipients(project)
     notifs = load_notifications()
+    notif_id = uuid.uuid4().hex
     notifs.append({
-        "id":         uuid.uuid4().hex,
-        "created_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "created_by": created_by,
-        "project":    project,
-        "title":      title,
-        "body":       body,
-        "rows":       rows or [],
-        "recipients": recipients,
-        "read_by":    [],
+        "id":             notif_id,
+        "created_at":     datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "created_by":     created_by,
+        "project":        project,
+        "title":          title,
+        "body":           body,
+        "rows":           rows or [],
+        "recipients":     recipients,
+        "read_by":        [],
+        "status":         status,
+        "edits":          edits or {},
+        "rejection_note": rejection_note,
     })
+    save_notifications(notifs)
+    return notif_id
+
+
+def update_notification(notif_id: str, **fields) -> None:
+    """Update arbitrary fields on an existing notification record."""
+    notifs = load_notifications()
+    for n in notifs:
+        if n["id"] == notif_id:
+            n.update(fields)
     save_notifications(notifs)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1426,7 +1455,7 @@ if not st.session_state.authenticated:
             st.subheader("Sign In")
             username = st.text_input("Username", placeholder="Enter your username")
             password = st.text_input("Password", type="password", placeholder="Enter your password")
-            if st.button("Log In", type="primary", use_container_width=True):
+            if st.button("Log In", type="primary", width='stretch'):
                 user = USERS.get(username)
                 if user and _hcheck(password, user["hash"]):
                     st.session_state.update({
@@ -1447,7 +1476,7 @@ with st.sidebar:
     st.divider()
     st.write(f"**{st.session_state.display_name}**")
     st.caption(ROLE_LABEL.get(st.session_state.role, st.session_state.role))
-    if st.button("Log Out", use_container_width=True):
+    if st.button("Log Out", width='stretch'):
         st.session_state.update({"authenticated": False, "username": "",
                                   "display_name": "", "role": ""})
         st.rerun()
@@ -1516,7 +1545,7 @@ with st.sidebar:
             if _unread else "🔔  No new notifications"
         )
     st.divider()
-    if st.button("🔄  Refresh", use_container_width=True,
+    if st.button("🔄  Refresh", width='stretch',
                  help="Reload data from disk to see updates from other users."):
         # Clear data caches so fresh data is loaded from disk
         load_image_bytes.clear()
@@ -2698,7 +2727,7 @@ if "export" in tab_index:
                 file_name=fname,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
-                use_container_width=True,
+                width='stretch',
                 disabled=not _ready,
             )
             st.divider()
@@ -2930,7 +2959,7 @@ if "photos" in tab_index:
                 data=_backup_bytes,
                 file_name=_backup_fname,
                 mime="application/zip",
-                use_container_width=True,
+                width='stretch',
             )
             _n_photos = len(photos)
             _size_mb  = round(len(_backup_bytes) / 1_048_576, 1)
@@ -3199,20 +3228,185 @@ if "settings" in tab_index:
             _th5.caption("**Delete**")
             st.divider()
 
+            import pandas as _pd
             for notif in reversed(_all_notifs):
-                _is_unread = notif["id"] in _unread_ids
+                _is_unread  = notif["id"] in _unread_ids
+                _notif_status = notif.get("status", "info")
+
+                # ── Pending approval — full review UI ─────────────────────────
+                if _notif_status == "pending" and has_permission("settings"):
+                    with st.container(border=True):
+                        _pa1, _pa2 = st.columns([5, 1])
+                        with _pa1:
+                            st.write(f"🟡 **{notif['title']}**")
+                            st.caption(
+                                f"From: {notif.get('created_by','—')}  ·  "
+                                f"{notif.get('created_at','—')}  ·  "
+                                f"Project: {notif.get('project','—')}"
+                            )
+                        with _pa2:
+                            if st.button("🗑", key=f"notif_del_{notif['id']}",
+                                         help="Delete"):
+                                delete_notification(notif["id"])
+                                st.rerun()
+
+                        if notif.get("body"):
+                            st.write(notif["body"])
+
+                        # Editable activity table
+                        _edits = notif.get("edits", {})
+                        if notif.get("rows"):
+                            st.write("**Proposed changes:**")
+                            _entries_for_approval = load_entries()
+                            _approved_edits = {}
+                            for _row in notif["rows"]:
+                                _aid = _row.get("Activity ID","")
+                                _cur = next((e for e in _entries_for_approval
+                                             if e.get("activity_id") == _aid), {})
+                                _prop = _edits.get(_aid, {})
+                                with st.expander(
+                                    f"`{_aid}`  {_row.get('Activity Name','')}",
+                                    expanded=False,
+                                ):
+                                    _ec1, _ec2 = st.columns(2)
+                                    with _ec1:
+                                        st.write("**Current (stored)**")
+                                        st.write(f"- Status: {_cur.get('activity_status','—')}")
+                                        st.write(f"- Start: {display_dt(_cur.get('actual_start',''))}")
+                                        st.write(f"- Finish: {display_dt(_cur.get('actual_finish',''))}")
+                                        st.write(f"- % Complete: {_cur.get('pct_complete','—')}")
+                                        st.write(f"- Remaining: {_cur.get('remaining_dur','—')}")
+                                    with _ec2:
+                                        st.write("**Proposed (editable)**")
+                                        _new_status = st.selectbox(
+                                            "Status",
+                                            STATUS_OPTIONS,
+                                            index=STATUS_OPTIONS.index(_prop.get("activity_status","Not Started"))
+                                                  if _prop.get("activity_status") in STATUS_OPTIONS else 0,
+                                            key=f"apr_status_{notif['id']}_{_aid}",
+                                        )
+                                        _new_pct = st.number_input(
+                                            "% Complete", min_value=0, max_value=100, step=5,
+                                            value=int(_prop.get("pct_complete") or 0),
+                                            key=f"apr_pct_{notif['id']}_{_aid}",
+                                        )
+                                        _new_rem = st.text_input(
+                                            "Remaining (days)",
+                                            value=str(_prop.get("remaining_dur","") or ""),
+                                            key=f"apr_rem_{notif['id']}_{_aid}",
+                                        ).strip()
+                                        _new_start = st.text_input(
+                                            "Actual Start",
+                                            value=display_dt(_prop.get("actual_start","")),
+                                            key=f"apr_start_{notif['id']}_{_aid}",
+                                            disabled=True,
+                                        )
+                                        _new_finish = st.text_input(
+                                            "Actual Finish",
+                                            value=display_dt(_prop.get("actual_finish","")),
+                                            key=f"apr_finish_{notif['id']}_{_aid}",
+                                            disabled=True,
+                                        )
+                                    _approved_edits[_aid] = {
+                                        **_prop,
+                                        "activity_status": _new_status,
+                                        "pct_complete":    str(_new_pct),
+                                        "remaining_dur":   _new_rem,
+                                    }
+
+                        # Approve / Reject buttons
+                        st.divider()
+                        _ab1, _ab2, _ab3 = st.columns([2, 2, 3])
+                        with _ab1:
+                            if st.button("✅ Approve & Apply",
+                                         key=f"apr_approve_{notif['id']}",
+                                         type="primary", use_container_width=True):
+                                # Write approved edits to entries
+                                _all_e = load_entries()
+                                _idx_map = {
+                                    (e.get("activity_id","").upper(),
+                                     get_project_from_wbs(e.get("wbs_id",""))): i
+                                    for i, e in enumerate(_all_e)
+                                }
+                                for _aid, _edata in _approved_edits.items():
+                                    _proj = get_project_from_wbs(
+                                        next((e.get("wbs_id","") for e in _all_e
+                                              if e.get("activity_id") == _aid), "")
+                                    )
+                                    _idx = _idx_map.get((_aid.upper(), _proj))
+                                    if _idx is not None:
+                                        _all_e[_idx] = {**_all_e[_idx], **_edata}
+                                save_entries(_all_e)
+                                set_last_walk_date(notif.get("project",""), date.today())
+                                update_notification(notif["id"],
+                                    status="approved",
+                                    read_by=list({*notif.get("read_by",[]), _username}),
+                                )
+                                st.success("Walk approved and changes applied.")
+                                st.rerun()
+
+                        with _ab2:
+                            if st.button("❌ Reject",
+                                         key=f"apr_reject_{notif['id']}",
+                                         use_container_width=True):
+                                st.session_state[f"rejecting_{notif['id']}"] = True
+
+                        if st.session_state.get(f"rejecting_{notif['id']}"):
+                            with _ab3:
+                                _rej_note = st.text_input(
+                                    "Rejection note",
+                                    placeholder="Explain why the walk was rejected…",
+                                    key=f"apr_rej_note_{notif['id']}",
+                                )
+                                if st.button("Send rejection",
+                                             key=f"apr_rej_send_{notif['id']}",
+                                             disabled=not _rej_note):
+                                    # Notify the engineer
+                                    _eng_username = next(
+                                        (u for u, d in USERS.items()
+                                         if d["name"] == notif.get("created_by")), None
+                                    )
+                                    create_notification(
+                                        created_by  = _username,
+                                        project     = notif.get("project",""),
+                                        title       = f"Walk Rejected — {notif.get('project','')} — {notif.get('created_at','').split(' ')[0]}",
+                                        body        = (
+                                            "Your site walk was rejected by "
+                                            + f"**{st.session_state.display_name}**.\n\n"
+                                            + f"**Note:** {_rej_note}"
+                                        ),
+                                        recipients  = [_eng_username] if _eng_username else [],
+                                        status      = "rejected",
+                                    )
+                                    update_notification(notif["id"],
+                                        status="rejected",
+                                        rejection_note=_rej_note,
+                                        read_by=list({*notif.get("read_by",[]), _username}),
+                                    )
+                                    st.session_state.pop(f"rejecting_{notif['id']}", None)
+                                    st.success("Walk rejected and engineer notified.")
+                                    st.rerun()
+
+                    st.divider()
+                    continue  # skip standard row rendering for pending notifs
+
+                # ── Standard notification row ─────────────────────────────────
+                _status_icon = {"approved": "✅ ", "rejected": "❌ ", "info": ""}.get(
+                    _notif_status, ""
+                )
                 _tc1, _tc2, _tc3, _tc4, _tc5 = st.columns([3, 2, 2, 1, 1])
 
                 with _tc1:
                     prefix = "🔵 " if _is_unread else ""
-                    st.write(f"{prefix}{notif['title']}")
+                    st.write(f"{prefix}{_status_icon}{notif['title']}")
                     if notif.get("project"):
                         st.caption(notif["project"])
                     with st.expander("Details"):
                         if notif.get("body"):
                             st.write(notif["body"])
+                        if notif.get("rejection_note"):
+                            st.error(f"Rejection note: {notif['rejection_note']}")
                         if notif.get("rows"):
-                            import pandas as _pd
                             st.dataframe(
                                 _pd.DataFrame(notif["rows"]),
                                 use_container_width=True,
@@ -3565,6 +3759,131 @@ if "settings" in tab_index:
                 st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SITE WALK — GANTT EDIT DIALOG
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.dialog("Edit Activity", width="large")
+def gantt_edit_dialog(act: dict, rpt_date, today, sw_edits: dict, sw_activities: list):
+    """Modal edit form launched when a bar is clicked on the Gantt chart."""
+    aid    = act["activity_id"]
+    merged = {**act, **sw_edits.get(aid, {})}
+
+    st.subheader(f"`{aid}`  {merged.get('activity_name','')}")
+    st.caption(f"WBS: {merged.get('wbs_id','—')}")
+    st.divider()
+
+    new_status = st.selectbox(
+        "Status", STATUS_OPTIONS,
+        index=STATUS_OPTIONS.index(merged.get("activity_status","Not Started"))
+              if merged.get("activity_status") in STATUS_OPTIONS else 0,
+        key=f"dlg_status_{aid}",
+    )
+
+    dlg_start_dt = dlg_finish_dt = None
+    dlg_pct = 0
+    dlg_rem = ""
+
+    if new_status == "Not Started":
+        st.info("% Complete set to 0 automatically.", icon="ℹ️")
+
+    elif new_status == "In Progress":
+        dlg_start_dt = datetime_inputs(
+            "Actual Start *", key=f"dlg_start_{aid}", required=True,
+            default_dt=iso_to_dt(merged.get("actual_start","")),
+        )
+        c_p, c_r = st.columns(2)
+        with c_r:
+            dlg_rem = st.text_input(
+                "Remaining Duration (days) *",
+                value=str(merged.get("remaining_dur","") or ""),
+                placeholder="e.g. 5",
+                key=f"dlg_rem_{aid}",
+            ).strip()
+        _dlg_suggested = None
+        if rpt_date and dlg_rem and dlg_start_dt:
+            _ef = expected_finish_date(rpt_date, dlg_rem)
+            if _ef:
+                _dlg_suggested = calc_duration_pct(dt_to_iso(dlg_start_dt), _ef, rpt_date)
+        with c_p:
+            _dlg_pct_def = _dlg_suggested if _dlg_suggested is not None else                            int(merged.get("pct_complete") or 0)
+            dlg_pct = st.number_input(
+                "Duration % Complete *", min_value=0, max_value=99, step=5,
+                value=_dlg_pct_def, key=f"dlg_pct_{aid}",
+            )
+            if _dlg_suggested is not None:
+                st.caption(f"💡 Calculated: **{_dlg_suggested}%**")
+
+    elif new_status == "Completed":
+        dlg_start_dt = datetime_inputs(
+            "Actual Start *", key=f"dlg_start_{aid}", required=True,
+            default_dt=iso_to_dt(merged.get("actual_start","")),
+        )
+        dlg_finish_dt = datetime_inputs(
+            "Actual Finish *", key=f"dlg_finish_{aid}", required=True,
+            default_dt=iso_to_dt(merged.get("actual_finish","")),
+        )
+        dlg_pct = 100
+        dlg_rem = "0"
+        st.info("% Complete set to 100, Remaining to 0.", icon="✅")
+
+    # Comments
+    st.divider()
+    _dlg_existing_cmts = merged.get("_comments",[])
+    if _dlg_existing_cmts:
+        with st.expander(f"💬 {len(_dlg_existing_cmts)} existing comments"):
+            for c in _dlg_existing_cmts:
+                st.write(f"**{c['at']}** — {c['by']}")
+                st.write(c["text"])
+    dlg_new_cmt = st.text_area(
+        "Add comment", placeholder="Enter progress notes...",
+        height=80, key=f"dlg_cmt_{aid}",
+    ).strip()
+
+    st.divider()
+    col_save, col_cancel = st.columns(2)
+    with col_save:
+        if st.button("💾 Save", type="primary", key=f"dlg_save_{aid}",
+                     use_container_width=True):
+            errs = []
+            if new_status in ("In Progress","Completed") and not dlg_start_dt:
+                errs.append("Actual Start is required.")
+            if new_status == "Completed" and not dlg_finish_dt:
+                errs.append("Actual Finish is required.")
+            if new_status == "In Progress" and not dlg_rem:
+                errs.append("Remaining Duration is required.")
+            if dlg_start_dt and dlg_finish_dt and dlg_finish_dt < dlg_start_dt:
+                errs.append("Actual Finish cannot be before Actual Start.")
+            if errs:
+                for e in errs: st.error(e)
+            else:
+                upd_cmts = list(merged.get("_comments",[]))
+                if dlg_new_cmt:
+                    upd_cmts.insert(0, {
+                        "text": dlg_new_cmt,
+                        "by":   st.session_state.display_name,
+                        "at":   datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    })
+                sw_edits[aid] = {
+                    "activity_status": new_status,
+                    "actual_start":    dt_to_iso(dlg_start_dt)  if dlg_start_dt  else "",
+                    "actual_finish":   dt_to_iso(dlg_finish_dt) if dlg_finish_dt else "",
+                    "pct_complete":    str(dlg_pct),
+                    "remaining_dur":   dlg_rem,
+                    "_comments":       upd_cmts,
+                    "_submitted_at":   datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    "_submitted_by":   st.session_state.display_name,
+                }
+                st.session_state["sw_edits"] = sw_edits
+                st.session_state["sw_gantt_clicked"] = None
+                st.rerun()
+    with col_cancel:
+        if st.button("✖ Cancel", key=f"dlg_cancel_{aid}",
+                     use_container_width=True):
+            st.session_state["sw_gantt_clicked"] = None
+            st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # TAB: SITE WALK
 # ══════════════════════════════════════════════════════════════════════════════
 # Shows all In Progress activities + Not Started activities whose predicted
@@ -3612,8 +3931,9 @@ if "sitewalk" in tab_index:
                         pred = e.get("predicted_start", "")
                         if pred:
                             pd = iso_to_dt(pred)
-                            if pd and pd.date() <= _today:
+                            if pd and pd.date() <= _today + timedelta(days=LOOKAHEADDAYS):
                                 sw_activities.append(e.copy())
+
 
                 if not sw_activities:
                     st.info(
@@ -3678,6 +3998,252 @@ if "sitewalk" in tab_index:
                 f"Showing **{len(visible_acts)}** of **{len(sw_activities)}** activities"
                 + (f" — {len(sw_edits)} edited" if sw_edits else "")
             )
+
+            # ── Gantt chart toggle ────────────────────────────────────────────
+            show_gantt = st.toggle("📊 Show Gantt Chart", value=False, key="sw_gantt_toggle")
+
+            if show_gantt and visible_acts:
+                # Collect bar data for each activity
+                from datetime import timedelta as _td
+                _gantt_bars = []
+                for _ga in visible_acts:
+                    _aid    = _ga["activity_id"]
+                    _status = _ga.get("activity_status","")
+                    _start  = None
+                    _end    = None
+
+                    if _status == "Completed":
+                        _start = iso_to_dt(_ga.get("actual_start",""))
+                        _end   = iso_to_dt(_ga.get("actual_finish",""))
+                        if _start: _start = _start.date()
+                        if _end:   _end   = _end.date()
+
+                    elif _status == "In Progress":
+                        _rpt = _rpt_date_sw or _today
+                        _start = _rpt
+                        try:
+                            _rem_days = int(float(_ga.get("remaining_dur","0") or 0))
+                        except ValueError:
+                            _rem_days = 0
+                        _end = _add_working_days(_rpt, _rem_days)
+
+                    elif _status == "Not Started":
+                        _pred = iso_to_dt(_ga.get("predicted_start",""))
+                        if _pred:
+                            _start = _pred.date()
+                            try:
+                                _rem_days = int(float(_ga.get("remaining_dur","0") or 0))
+                            except ValueError:
+                                _rem_days = 0
+                            _end = _add_working_days(_start, _rem_days)
+
+                    if _start and _end and _end >= _start:
+                        _gantt_bars.append({
+                            "aid":    _aid,
+                            "name":   _ga.get("activity_name",""),
+                            "status": _status,
+                            "start":  _start,
+                            "end":    _end,
+                        })
+
+                if not _gantt_bars:
+                    st.info("No activities have enough date data to display on the chart.")
+                else:
+                    # Chart dimensions
+                    _all_starts = [b["start"] for b in _gantt_bars]
+                    _all_ends   = [b["end"]   for b in _gantt_bars]
+                    _chart_start = min(_all_starts)
+                    _chart_end   = max(_all_ends)
+                    _total_days  = max((_chart_end - _chart_start).days + 1, 1)
+
+                    _BAR_H    = 36    # bar height px — taller for two-line labels
+                    _ROW_GAP  = 10    # gap between rows px
+                    _LABEL_W  = 220   # left label column — wide enough for full names
+                    _CHART_W  = 820   # chart area width px
+                    _HEADER_H = 44    # header row height px
+                    _ROW_H    = _BAR_H + _ROW_GAP
+                    _SVG_H    = _HEADER_H + len(_gantt_bars) * _ROW_H + 20
+                    _SVG_W    = _LABEL_W + _CHART_W + 10
+
+                    _COLOURS = {
+                        "Completed":   "#16a34a",
+                        "In Progress": "#d97706",
+                        "Not Started": "#6b7280",
+                    }
+
+                    def _x(d):
+                        return _LABEL_W + int(((d - _chart_start).days / _total_days) * _CHART_W)
+
+                    # Build SVG
+                    _svg_parts = [
+                        f'<svg xmlns="http://www.w3.org/2000/svg" '
+                        f'width="{_SVG_W}" height="{_SVG_H}" '
+                        f'style="font-family:Arial,sans-serif;background:#f8f9fb">',
+                        # Clip path keeps label text inside the label column
+                        f'<defs><clipPath id="label-clip">'
+                        f'<rect x="0" y="0" width="{_LABEL_W - 6}" height="{_SVG_H}"/>'
+                        f'</clipPath></defs>',
+                    ]
+
+                    # Vertical separator between label column and chart
+                    _svg_parts.append(
+                        f'<line x1="{_LABEL_W}" y1="0" x2="{_LABEL_W}" y2="{_SVG_H}" '
+                        f'stroke="#d1d5db" stroke-width="1"/>'
+                    )
+
+                    # Background grid — one vertical line per week
+                    _cur = _chart_start
+                    while _cur <= _chart_end:
+                        if _cur.weekday() == 0:  # Monday
+                            _gx = _x(_cur)
+                            _svg_parts.append(
+                                f'<line x1="{_gx}" y1="{_HEADER_H}" '
+                                f'x2="{_gx}" y2="{_SVG_H}" '
+                                f'stroke="#e2e8f0" stroke-width="1"/>'
+                            )
+                            _lbl = _cur.strftime("%d %b")
+                            _svg_parts.append(
+                                f'<text x="{_gx+2}" y="{_HEADER_H-6}" '
+                                f'font-size="10" fill="#6b7280">{_lbl}</text>'
+                            )
+                        _cur += _td(days=1)
+
+                    # Today line
+                    if _chart_start <= _today <= _chart_end:
+                        _tx = _x(_today)
+                        _svg_parts.append(
+                            f'<line x1="{_tx}" y1="{_HEADER_H}" '
+                            f'x2="{_tx}" y2="{_SVG_H}" '
+                            f'stroke="#ef4444" stroke-width="2" stroke-dasharray="4,3"/>'
+                        )
+                        _svg_parts.append(
+                            f'<text x="{_tx+3}" y="{_HEADER_H-6}" '
+                            f'font-size="10" fill="#ef4444" font-weight="bold">Today</text>'
+                        )
+
+                    # Bars
+                    for _bi, _bar in enumerate(_gantt_bars):
+                        _y    = _HEADER_H + _bi * _ROW_H + _ROW_GAP // 2
+                        _x1   = _x(_bar["start"])
+                        _x2   = _x(_bar["end"])
+                        _bw   = max(_x2 - _x1, 4)
+                        _col  = _COLOURS.get(_bar["status"], "#6b7280")
+                        _is_staged = _bar["aid"] in sw_edits
+
+                        # Row background
+                        _bg = "#eef2f8" if _bi % 2 == 0 else "#ffffff"
+                        _svg_parts.append(
+                            f'<rect x="0" y="{_y}" width="{_SVG_W}" '
+                            f'height="{_BAR_H}" fill="{_bg}"/>'
+                        )
+
+                        # Activity label — split into two lines if needed
+                        _name = _bar["name"]
+                        _max_chars = 28   # chars that fit in _LABEL_W at font-size 11
+                        if len(_name) <= _max_chars:
+                            # Single line — vertically centred
+                            _svg_parts.append(
+                                f'<text x="4" y="{_y + _BAR_H//2 + 4}" '
+                                f'font-size="11" fill="#1C3557" font-weight="bold"'
+                                f'clip-path="url(#label-clip)">{_name}</text>'
+                            )
+                        else:
+                            # Two lines — split at last space before midpoint
+                            _mid = _max_chars
+                            _split = _name.rfind(" ", 0, _mid)
+                            if _split == -1:
+                                _split = _mid
+                            _line1 = _name[:_split].strip()
+                            _line2 = _name[_split:].strip()
+                            if len(_line2) > _max_chars:
+                                _line2 = _line2[:_max_chars-1] + "…"
+                            _svg_parts.append(
+                                f'<text x="4" y="{_y + _BAR_H//2 - 4}" '
+                                f'font-size="11" fill="#1C3557" font-weight="bold"'
+                                f'clip-path="url(#label-clip)">{_line1}</text>'
+                            )
+                            _svg_parts.append(
+                                f'<text x="4" y="{_y + _BAR_H//2 + 10}" '
+                                f'font-size="11" fill="#1C3557"'
+                                f'clip-path="url(#label-clip)">{_line2}</text>'
+                            )
+
+                        # Bar
+                        _stroke = "#1C3557" if _is_staged else "none"
+                        _svg_parts.append(
+                            f'<rect x="{_x1}" y="{_y+3}" width="{_bw}" '
+                            f'height="{_BAR_H-6}" rx="3" '
+                            f'fill="{_col}" stroke="{_stroke}" stroke-width="2" opacity="0.85"/>'
+                        )
+
+                        # Bar label — activity ID if bar wide enough
+                        if _bw > 40:
+                            _svg_parts.append(
+                                f'<text x="{_x1+5}" y="{_y + _BAR_H//2 + 4}" '
+                                f'font-size="10" fill="white" font-weight="bold"'
+                                f'>{_bar["aid"]}</text>'
+                            )
+
+                        # Staged indicator
+                        if _is_staged:
+                            _svg_parts.append(
+                                f'<text x="{_x2+4}" y="{_y + _BAR_H//2 + 4}" '
+                                f'font-size="10" fill="#16a34a">✓</text>'
+                            )
+
+                    # Report date line (if set)
+                    if _rpt_date_sw and _chart_start <= _rpt_date_sw <= _chart_end:
+                        _rx = _x(_rpt_date_sw)
+                        _svg_parts.append(
+                            f'<line x1="{_rx}" y1="{_HEADER_H}" '
+                            f'x2="{_rx}" y2="{_SVG_H}" '
+                            f'stroke="#1d4ed8" stroke-width="2" stroke-dasharray="6,3"/>'
+                        )
+                        _svg_parts.append(
+                            f'<text x="{_rx+3}" y="{_HEADER_H-6}" '
+                            f'font-size="10" fill="#1d4ed8" font-weight="bold">Data date</text>'
+                        )
+
+                    # Legend
+                    _lx = _LABEL_W + 4
+                    _ly = _SVG_H - 14
+                    for _ls, _lc in _COLOURS.items():
+                        _svg_parts.append(
+                            f'<rect x="{_lx}" y="{_ly-8}" width="12" height="10" '
+                            f'rx="2" fill="{_lc}"/>'
+                        )
+                        _svg_parts.append(
+                            f'<text x="{_lx+15}" y="{_ly}" font-size="10" '
+                            f'fill="#374151">{_ls}</text>'
+                        )
+                        _lx += 100
+
+                    _svg_parts.append("</svg>")
+
+                    # Add onclick to each bar that scrolls to the activity card below
+                    _svg_final = "".join(_svg_parts)
+                    for _bar in _gantt_bars:
+                        _safe_aid   = _bar["aid"].replace("'","")
+                        _bar_colour = _COLOURS.get(_bar["status"], "#6b7280")
+                        _bar_colour = _COLOURS.get(_bar["status"], "#6b7280")
+                        _scroll_fn  = "scrollIntoView({behavior:'smooth',block:'center'})"
+                        _el_id      = "'sw_act_" + _safe_aid + "'"
+                        _scroll_js  = (
+                            "onclick=\"window.parent.document.getElementById("
+                            + _el_id + ")." + _scroll_fn + "\""
+                        )
+                        _old = f'fill="{_bar_colour}" stroke='
+                        _new = f'fill="{_bar_colour}" style="cursor:pointer" {_scroll_js} stroke='
+                        _svg_final = _svg_final.replace(_old, _new, 1)
+
+                    st.caption("Click a bar to scroll to that activity below.")
+                    import streamlit.components.v1 as _components
+                    _components.html(
+                        f'<div style="overflow-x:auto">{_svg_final}</div>',
+                        height=_SVG_H + 30,
+                        scrolling=False,
+                    )
+
             st.divider()
 
             if not visible_acts:
@@ -3691,6 +4257,12 @@ if "sitewalk" in tab_index:
 
                 status_colour = STATUS_COLOUR.get(merged.get("activity_status",""), "#6b7280")
                 _is_staged = aid in sw_edits
+
+                # Anchor so Gantt bar clicks can scrollIntoView here
+                st.markdown(
+                    f'<div id="sw_act_{aid}" style="scroll-margin-top:80px"></div>',
+                    unsafe_allow_html=True,
+                )
                 with st.container(border=True):
                     # Header — show persistent staged indicator if reviewed
                     h_left, h_right = st.columns([4, 1])
@@ -3724,6 +4296,7 @@ if "sitewalk" in tab_index:
                             placeholder="e.g. 5",
                             key=f"sw_rem_{aid}",
                             ).strip()
+                        
                     elif new_status == "In Progress":
                         sw_start_dt = datetime_inputs(
                             "Actual Start *", key=f"sw_start_{aid}", required=True,
@@ -3787,6 +4360,39 @@ if "sitewalk" in tab_index:
                             label_visibility="collapsed",
                         ).strip()
 
+                    # ── Photo capture ─────────────────────────────────────────
+                    with st.expander("📷  Add Photo"):
+                        st.caption(
+                            "Photo will be saved to the Photo Log and automatically "
+                            "assigned to this activity."
+                        )
+                        sw_photo_date = st.date_input(
+                            "Photo date",
+                            value=_today,
+                            format="DD/MM/YYYY",
+                            key=f"sw_photo_date_{aid}",
+                        )
+                        sw_photo_comment = st.text_input(
+                            "Photo comment (optional)",
+                            max_chars=100,
+                            placeholder="e.g. North face formwork installed",
+                            key=f"sw_photo_comment_{aid}",
+                        ).strip()
+                        sw_photo_file = st.file_uploader(
+                            "Choose image",
+                            type=["jpg","jpeg","png","webp"],
+                            key=f"sw_photo_file_{aid}",
+                        )
+                        if sw_photo_file:
+                            _sw_fb = sw_photo_file.read()
+                            if _PILLOW:
+                                _sw_prev = ImageOps.exif_transpose(
+                                    Image.open(io.BytesIO(_sw_fb))
+                                )
+                                st.image(_sw_prev, width=300)
+                            else:
+                                st.image(io.BytesIO(_sw_fb), width=300)
+
                     # Mark as reviewed button — stages changes to sw_edits
                     if st.button(f"✅  Mark reviewed", key=f"sw_review_{aid}"):
                         # Validate
@@ -3812,6 +4418,33 @@ if "sitewalk" in tab_index:
                                     "by":   st.session_state.display_name,
                                     "at":   datetime.now().strftime("%d/%m/%Y %H:%M"),
                                 })
+
+                            # Upload and assign photo if provided
+                            if sw_photo_file:
+                                _sw_fb = sw_photo_file.read() if sw_photo_file.size > 0 else                                          st.session_state.get(f"sw_photo_bytes_{aid}", b"")
+                                if not _sw_fb:
+                                    # file_uploader was already read in preview — get from session
+                                    pass
+                                else:
+                                    _sw_record = upload_photo(
+                                        photo_date    = sw_photo_date,
+                                        comment       = sw_photo_comment or f"Site walk — {aid}",
+                                        file_bytes    = _sw_fb,
+                                        original_name = sw_photo_file.name,
+                                        uploaded_by   = st.session_state.display_name,
+                                    )
+                                    # Assign to this activity
+                                    assign_photo(
+                                        _sw_record["id"], [aid],
+                                        st.session_state.display_name,
+                                        load_entries(),
+                                    )
+                                    # Invalidate photo caches
+                                    load_image_bytes.clear()
+                                    build_photo_backup.clear()
+                                    for _k in ("photo_list","photo_map","photo_assignments",
+                                               "photo_to_aids","aid_to_pids","_assign_sig"):
+                                        st.session_state.pop(_k, None)
 
                             sw_edits[aid] = {
                                 "activity_status": new_status,
@@ -3885,21 +4518,12 @@ if "sitewalk" in tab_index:
                        if n_edited else " Mark activities as reviewed above.")
                 )
                 if st.button(
-                    f"💾  Complete Walk ({n_edited} updates)",
+                    f"💾  Submit Walk for Approval ({n_edited} updates)",
                     type="primary",
                     disabled=(n_edited == 0),
                     key="sw_commit",
                 ):
-                    all_entries  = load_entries()
-                    saved_count  = 0
-                    for idx, entry in enumerate(all_entries):
-                        if entry.get("activity_id") in sw_edits:
-                            all_entries[idx] = {**entry, **sw_edits[entry["activity_id"]]}
-                            saved_count += 1
-                    save_entries(all_entries)
-                    set_last_walk_date(_sel_project, _today)
-
-                    # Build and fire notification for admin inbox
+                    # Build rows table for the notification body
                     _notif_rows = []
                     for _eid, _edata in sw_edits.items():
                         _orig = next((e for e in sw_activities if e["activity_id"] == _eid), {})
@@ -3912,21 +4536,28 @@ if "sitewalk" in tab_index:
                             "Actual Start":     display_dt(_edata.get("actual_start","")),
                             "Actual Finish":    display_dt(_edata.get("actual_finish","")),
                         })
+
+                    # Store as pending approval — do NOT write to entries yet
                     create_notification(
                         created_by = st.session_state.display_name,
                         project    = _sel_project,
-                        title      = f"Site Walk — {_sel_project} — {_today.strftime('%d/%m/%Y')}",
+                        title      = f"Site Walk Approval — {_sel_project} — {_today.strftime('%d/%m/%Y')}",
                         body       = (
-                            f"Walk completed by **{st.session_state.display_name}**"
-                            f" on {_today.strftime('%d/%m/%Y')}."
+                            f"Walk submitted by **{st.session_state.display_name}**"
+                            f" on {_today.strftime('%d/%m/%Y')}. Awaiting approval."
                         ),
                         rows       = _notif_rows,
+                        status     = "pending",
+                        edits      = dict(sw_edits),
+                        recipients = get_project_admin_recipients(_sel_project),
                     )
 
                     for _k in ("sw_active", "sw_activities", "sw_edits"):
                         st.session_state.pop(_k, None)
 
-                    st.success(f"✅ Walk complete — {saved_count} activities updated.")
+                    st.success(
+                        f"✅ Walk submitted — {n_edited} activities pending admin approval."
+                    )
                     st.rerun()
 
             with cancel_col:
