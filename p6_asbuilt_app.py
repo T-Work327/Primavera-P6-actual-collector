@@ -1436,6 +1436,33 @@ def datetime_inputs(label: str, key: str, required: bool = True,
 
 st.set_page_config(page_title="P6 Asbuilt Collector", page_icon="🏗️", layout="wide")
 
+# ── Mobile camera helper ──────────────────────────────────────────────────────
+# Injects accept="image/*" capture="environment" onto Streamlit file uploaders
+# so mobile/tablet devices open the camera app directly.
+# Call inject_camera_uploader(key) right after the st.file_uploader widget.
+
+def inject_camera_uploader(uploader_key: str) -> None:
+    """Patch the hidden <input type=file> to open the camera on mobile."""
+    st.markdown(
+        f"""<script>
+        (function() {{
+            function patch() {{
+                var inputs = window.parent.document.querySelectorAll('input[type=file]');
+                inputs.forEach(function(el) {{
+                    el.setAttribute('accept', 'image/*');
+                    el.setAttribute('capture', 'environment');
+                }});
+            }}
+            patch();
+            setTimeout(patch, 500);
+            setTimeout(patch, 1500);
+        }})();
+        </script>""",
+        unsafe_allow_html=True,
+    )
+
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # AUTH — SESSION STATE & LOGIN SCREEN
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2826,6 +2853,7 @@ if "photos" in tab_index:
                 type=["jpg", "jpeg", "png", "webp", "gif"],
                 key="photo_upload_file",
             )
+            inject_camera_uploader("photo_upload_file")
 
             if uploaded_file:
                 # Read bytes once — reused for both preview and upload
@@ -4091,21 +4119,31 @@ if "sitewalk" in tab_index:
                         f'stroke="#d1d5db" stroke-width="1"/>'
                     )
 
-                    # Background grid — one vertical line per week
+                    # Background grid lines — every week (Monday)
+                    # Date labels — every 2 weeks to avoid overlap
+                    # Minimum px between labels to prevent crowding
+                    _MIN_LABEL_GAP = 55
+                    _week_num      = 0
+                    _last_label_x  = -999
                     _cur = _chart_start
                     while _cur <= _chart_end:
                         if _cur.weekday() == 0:  # Monday
                             _gx = _x(_cur)
+                            # Gridline every week
                             _svg_parts.append(
                                 f'<line x1="{_gx}" y1="{_HEADER_H}" '
                                 f'x2="{_gx}" y2="{_SVG_H}" '
                                 f'stroke="#e2e8f0" stroke-width="1"/>'
                             )
-                            _lbl = _cur.strftime("%d %b")
-                            _svg_parts.append(
-                                f'<text x="{_gx+2}" y="{_HEADER_H-6}" '
-                                f'font-size="10" fill="#6b7280">{_lbl}</text>'
-                            )
+                            # Date label only when far enough from last label
+                            if _gx - _last_label_x >= _MIN_LABEL_GAP:
+                                _lbl = _cur.strftime("%d %b")
+                                _svg_parts.append(
+                                    f'<text x="{_gx+2}" y="{_HEADER_H-6}" '
+                                    f'font-size="10" fill="#6b7280">{_lbl}</text>'
+                                )
+                                _last_label_x = _gx
+                            _week_num += 1
                         _cur += _td(days=1)
 
                     # Today line
@@ -4164,7 +4202,7 @@ if "sitewalk" in tab_index:
                             )
                             _svg_parts.append(
                                 f'<text x="4" y="{_y + _BAR_H//2 + 10}" '
-                                f'font-size="11" fill="#1C3557"'
+                                f'font-size="11" fill="#1C3557" font-weight="bold" '
                                 f'clip-path="url(#label-clip)">{_line2}</text>'
                             )
 
@@ -4383,6 +4421,7 @@ if "sitewalk" in tab_index:
                             type=["jpg","jpeg","png","webp"],
                             key=f"sw_photo_file_{aid}",
                         )
+                        inject_camera_uploader(f"sw_photo_file_{aid}")
                         if sw_photo_file:
                             _sw_fb = sw_photo_file.read()
                             if _PILLOW:
