@@ -3283,64 +3283,56 @@ if "settings" in tab_index:
 
                         # Editable activity table
                         _edits = notif.get("edits", {})
+                        _approved_edits = {}
                         if notif.get("rows"):
-                            st.write("**Proposed changes:**")
+                            st.write("**Proposed changes — edit cells before approving:**")
                             _entries_for_approval = load_entries()
-                            _approved_edits = {}
+
+                            # Build table rows: one per changed activity
+                            _tbl_rows = []
                             for _row in notif["rows"]:
-                                _aid = _row.get("Activity ID","")
-                                _cur = next((e for e in _entries_for_approval
-                                             if e.get("activity_id") == _aid), {})
+                                _aid  = _row.get("Activity ID","")
                                 _prop = _edits.get(_aid, {})
-                                with st.expander(
-                                    f"`{_aid}`  {_row.get('Activity Name','')}",
-                                    expanded=False,
-                                ):
-                                    _ec1, _ec2 = st.columns(2)
-                                    with _ec1:
-                                        st.write("**Current (stored)**")
-                                        st.write(f"- Status: {_cur.get('activity_status','—')}")
-                                        st.write(f"- Start: {display_dt(_cur.get('actual_start',''))}")
-                                        st.write(f"- Finish: {display_dt(_cur.get('actual_finish',''))}")
-                                        st.write(f"- % Complete: {_cur.get('pct_complete','—')}")
-                                        st.write(f"- Remaining: {_cur.get('remaining_dur','—')}")
-                                    with _ec2:
-                                        st.write("**Proposed (editable)**")
-                                        _new_status = st.selectbox(
-                                            "Status",
-                                            STATUS_OPTIONS,
-                                            index=STATUS_OPTIONS.index(_prop.get("activity_status","Not Started"))
-                                                  if _prop.get("activity_status") in STATUS_OPTIONS else 0,
-                                            key=f"apr_status_{notif['id']}_{_aid}",
-                                        )
-                                        _new_pct = st.number_input(
-                                            "% Complete", min_value=0, max_value=100, step=5,
-                                            value=int(_prop.get("pct_complete") or 0),
-                                            key=f"apr_pct_{notif['id']}_{_aid}",
-                                        )
-                                        _new_rem = st.text_input(
-                                            "Remaining (days)",
-                                            value=str(_prop.get("remaining_dur","") or ""),
-                                            key=f"apr_rem_{notif['id']}_{_aid}",
-                                        ).strip()
-                                        _new_start = st.text_input(
-                                            "Actual Start",
-                                            value=display_dt(_prop.get("actual_start","")),
-                                            key=f"apr_start_{notif['id']}_{_aid}",
-                                            disabled=True,
-                                        )
-                                        _new_finish = st.text_input(
-                                            "Actual Finish",
-                                            value=display_dt(_prop.get("actual_finish","")),
-                                            key=f"apr_finish_{notif['id']}_{_aid}",
-                                            disabled=True,
-                                        )
-                                    _approved_edits[_aid] = {
-                                        **_prop,
-                                        "activity_status": _new_status,
-                                        "pct_complete":    str(_new_pct),
-                                        "remaining_dur":   _new_rem,
-                                    }
+                                _tbl_rows.append({
+                                    "Activity ID":       _aid,
+                                    "Activity Name":     _row.get("Activity Name",""),
+                                    "Status":            _prop.get("activity_status",""),
+                                    "% Complete":        int(_prop.get("pct_complete") or 0),
+                                    "Remaining (days)":  str(_prop.get("remaining_dur","") or ""),
+                                    "Actual Start":      display_dt(_prop.get("actual_start","")),
+                                    "Actual Finish":     display_dt(_prop.get("actual_finish","")),
+                                })
+
+                            _edited_df = st.data_editor(
+                                _pd.DataFrame(_tbl_rows),
+                                key=f"apr_table_{notif['id']}",
+                                use_container_width=True,
+                                hide_index=True,
+                                column_config={
+                                    "Activity ID":      st.column_config.TextColumn(disabled=True),
+                                    "Activity Name":    st.column_config.TextColumn(disabled=True),
+                                    "Status":           st.column_config.SelectboxColumn(
+                                                            options=STATUS_OPTIONS
+                                                        ),
+                                    "% Complete":       st.column_config.NumberColumn(
+                                                            min_value=0, max_value=100, step=5
+                                                        ),
+                                    "Remaining (days)": st.column_config.TextColumn(),
+                                    "Actual Start":     st.column_config.TextColumn(disabled=True),
+                                    "Actual Finish":    st.column_config.TextColumn(disabled=True),
+                                },
+                            )
+
+                            # Rebuild approved_edits from the (possibly edited) table
+                            for _, _erow in _edited_df.iterrows():
+                                _aid  = _erow["Activity ID"]
+                                _prop = _edits.get(_aid, {})
+                                _approved_edits[_aid] = {
+                                    **_prop,
+                                    "activity_status": _erow["Status"],
+                                    "pct_complete":    str(int(_erow["% Complete"])),
+                                    "remaining_dur":   str(_erow["Remaining (days)"]),
+                                }
 
                         # Approve / Reject buttons
                         st.divider()
@@ -3787,6 +3779,152 @@ if "settings" in tab_index:
                 st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
+# GANTT CHART BUILDER — reusable SVG generator
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_gantt_svg(activities: list[dict], report_date=None,
+                    title: str = "") -> str:
+    """
+    Build a Gantt chart SVG string from a list of activity dicts.
+    Each dict needs: activity_id, activity_name, activity_status,
+                     actual_start, actual_finish, predicted_start,
+                     remaining_dur
+    Returns an SVG string or "" if no bars can be drawn.
+    """
+    from datetime import timedelta as _td2
+
+    _today2 = date.today()
+    _COLOURS2 = {
+        "Completed":   "#16a34a",
+        "In Progress": "#d97706",
+        "Not Started": "#6b7280",
+    }
+
+    bars = []
+    for act in activities:
+        status = act.get("activity_status","")
+        start = end = None
+        if status == "Completed":
+            s = iso_to_dt(act.get("actual_start",""))
+            e = iso_to_dt(act.get("actual_finish",""))
+            if s: start = s.date()
+            if e: end   = e.date()
+        elif status == "In Progress":
+            rpt = report_date or _today2
+            start = rpt
+            try:    rem = int(float(act.get("remaining_dur","0") or 0))
+            except: rem = 0
+            end = _add_working_days(rpt, rem)
+        elif status == "Not Started":
+            p = iso_to_dt(act.get("predicted_start",""))
+            if p:
+                start = p.date()
+                try:    rem = int(float(act.get("remaining_dur","0") or 0))
+                except: rem = 0
+                end = _add_working_days(start, rem)
+        if start and end and end >= start:
+            bars.append({
+                "aid":    act.get("activity_id",""),
+                "name":   act.get("activity_name",""),
+                "status": status,
+                "start":  start,
+                "end":    end,
+            })
+
+    if not bars:
+        return ""
+
+    all_starts   = [b["start"] for b in bars]
+    all_ends     = [b["end"]   for b in bars]
+    chart_start  = min(all_starts)
+    chart_end    = max(all_ends)
+    total_days   = max((chart_end - chart_start).days + 1, 1)
+
+    BAR_H   = 36;  ROW_GAP  = 10
+    LABEL_W = 180; CHART_W  = 500
+    HEADER_H= 52;  ROW_H    = BAR_H + ROW_GAP
+    SVG_H   = HEADER_H + len(bars) * ROW_H + 20
+    SVG_W   = LABEL_W + CHART_W + 10
+    MAX_CH  = 24
+
+    def _xg(d):
+        return LABEL_W + int(((d - chart_start).days / total_days) * CHART_W)
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{SVG_W}" height="{SVG_H}" '
+        f'style="font-family:Arial,sans-serif;background:#f8f9fb">',
+        f'<defs><clipPath id="lc2"><rect x="0" y="0" width="{LABEL_W-4}" height="{SVG_H}"/>'
+        f'</clipPath></defs>',
+    ]
+    if title:
+        parts.append(
+            f'<text x="{SVG_W//2}" y="16" font-size="11" fill="#1C3557" '
+            f'font-weight="bold" text-anchor="middle">{title}</text>'
+        )
+
+    # Separator
+    parts.append(f'<line x1="{LABEL_W}" y1="0" x2="{LABEL_W}" y2="{SVG_H}" '
+                 f'stroke="#d1d5db" stroke-width="1"/>')
+
+    # Grid + date labels
+    MIN_GAP   = 55
+    last_lx   = -999
+    cur       = chart_start
+    while cur <= chart_end:
+        if cur.weekday() == 0:
+            gx = _xg(cur)
+            parts.append(f'<line x1="{gx}" y1="{HEADER_H}" x2="{gx}" y2="{SVG_H}" '
+                         f'stroke="#e2e8f0" stroke-width="1"/>')
+            if gx - last_lx >= MIN_GAP:
+                parts.append(f'<text x="{gx+2}" y="{HEADER_H-4}" font-size="9" '
+                              f'fill="#94a3b8">{cur.strftime("%d %b")}</text>')
+                last_lx = gx
+        cur += _td2(days=1)
+
+    # Bars
+    for bi, bar in enumerate(bars):
+        y   = HEADER_H + bi * ROW_H + ROW_GAP // 2
+        x1  = _xg(bar["start"])
+        x2  = _xg(bar["end"])
+        bw  = max(x2 - x1, 4)
+        col = _COLOURS2.get(bar["status"], "#6b7280")
+        bg  = "#eef2f8" if bi % 2 == 0 else "#ffffff"
+        parts.append(f'<rect x="0" y="{y}" width="{SVG_W}" height="{BAR_H}" fill="{bg}"/>')
+        name = bar["name"]
+        if len(name) <= MAX_CH:
+            parts.append(f'<text x="4" y="{y+BAR_H//2+4}" font-size="10" fill="#1C3557" '
+                         f'font-weight="bold" clip-path="url(#lc2)">{name}</text>')
+        else:
+            mid   = MAX_CH
+            split = name.rfind(" ", 0, mid) or mid
+            l1    = name[:split].strip()
+            l2    = (name[split:].strip())[:MAX_CH-1] + ("…" if len(name[split:].strip()) > MAX_CH-1 else "")
+            parts.append(f'<text x="4" y="{y+BAR_H//2-3}" font-size="10" fill="#1C3557" '
+                         f'font-weight="bold" clip-path="url(#lc2)">{l1}</text>')
+            parts.append(f'<text x="4" y="{y+BAR_H//2+10}" font-size="10" fill="#1C3557" '
+                         f'font-weight="bold" clip-path="url(#lc2)">{l2}</text>')
+        parts.append(f'<rect x="{x1}" y="{y+3}" width="{bw}" height="{BAR_H-6}" rx="3" '
+                     f'fill="{col}" opacity="0.85"/>')
+
+    # Overlay lines
+    if chart_start <= _today2 <= chart_end:
+        tx = _xg(_today2)
+        parts.append(f'<line x1="{tx}" y1="0" x2="{tx}" y2="{SVG_H}" '
+                     f'stroke="#ef4444" stroke-width="2" stroke-dasharray="4,3"/>')
+        parts.append(f'<text x="{tx+2}" y="{HEADER_H//2}" font-size="9" '
+                     f'fill="#ef4444" font-weight="bold">Today</text>')
+    if report_date and chart_start <= report_date <= chart_end:
+        rx = _xg(report_date)
+        parts.append(f'<line x1="{rx}" y1="0" x2="{rx}" y2="{SVG_H}" '
+                     f'stroke="#1d4ed8" stroke-width="2" stroke-dasharray="6,3"/>')
+        parts.append(f'<text x="{rx+2}" y="{HEADER_H//2+12}" font-size="9" '
+                     f'fill="#1d4ed8" font-weight="bold">Data date</text>')
+
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SITE WALK — GANTT EDIT DIALOG
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -4088,7 +4226,7 @@ if "sitewalk" in tab_index:
                     _ROW_GAP  = 10    # gap between rows px
                     _LABEL_W  = 220   # left label column — wide enough for full names
                     _CHART_W  = 820   # chart area width px
-                    _HEADER_H = 44    # header row height px
+                    _HEADER_H = 52    # header row height — two label rows
                     _ROW_H    = _BAR_H + _ROW_GAP
                     _SVG_H    = _HEADER_H + len(_gantt_bars) * _ROW_H + 20
                     _SVG_W    = _LABEL_W + _CHART_W + 10
@@ -4139,25 +4277,12 @@ if "sitewalk" in tab_index:
                             if _gx - _last_label_x >= _MIN_LABEL_GAP:
                                 _lbl = _cur.strftime("%d %b")
                                 _svg_parts.append(
-                                    f'<text x="{_gx+2}" y="{_HEADER_H-6}" '
-                                    f'font-size="10" fill="#6b7280">{_lbl}</text>'
+                                    f'<text x="{_gx+2}" y="{_HEADER_H-4}" '
+                                    f'font-size="10" fill="#94a3b8">{_lbl}</text>'
                                 )
                                 _last_label_x = _gx
                             _week_num += 1
                         _cur += _td(days=1)
-
-                    # Today line
-                    if _chart_start <= _today <= _chart_end:
-                        _tx = _x(_today)
-                        _svg_parts.append(
-                            f'<line x1="{_tx}" y1="{_HEADER_H}" '
-                            f'x2="{_tx}" y2="{_SVG_H}" '
-                            f'stroke="#ef4444" stroke-width="2" stroke-dasharray="4,3"/>'
-                        )
-                        _svg_parts.append(
-                            f'<text x="{_tx+3}" y="{_HEADER_H-6}" '
-                            f'font-size="10" fill="#ef4444" font-weight="bold">Today</text>'
-                        )
 
                     # Bars
                     for _bi, _bar in enumerate(_gantt_bars):
@@ -4229,16 +4354,28 @@ if "sitewalk" in tab_index:
                                 f'font-size="10" fill="#16a34a">✓</text>'
                             )
 
-                    # Report date line (if set)
+                    # Today + Data date lines drawn AFTER bars — appear on top
+                    if _chart_start <= _today <= _chart_end:
+                        _tx = _x(_today)
+                        _svg_parts.append(
+                            f'<line x1="{_tx}" y1="0" '
+                            f'x2="{_tx}" y2="{_SVG_H}" '
+                            f'stroke="#ef4444" stroke-width="2" stroke-dasharray="4,3"/>'
+                        )
+                        _svg_parts.append(
+                            f'<text x="{_tx+3}" y="{_HEADER_H//2}" '
+                            f'font-size="10" fill="#ef4444" font-weight="bold">Today</text>'
+                        )
+
                     if _rpt_date_sw and _chart_start <= _rpt_date_sw <= _chart_end:
                         _rx = _x(_rpt_date_sw)
                         _svg_parts.append(
-                            f'<line x1="{_rx}" y1="{_HEADER_H}" '
+                            f'<line x1="{_rx}" y1="0" '
                             f'x2="{_rx}" y2="{_SVG_H}" '
                             f'stroke="#1d4ed8" stroke-width="2" stroke-dasharray="6,3"/>'
                         )
                         _svg_parts.append(
-                            f'<text x="{_rx+3}" y="{_HEADER_H-6}" '
+                            f'<text x="{_rx+3}" y="{_HEADER_H//2}" '
                             f'font-size="10" fill="#1d4ed8" font-weight="bold">Data date</text>'
                         )
 
