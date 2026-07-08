@@ -1006,6 +1006,16 @@ def save_tab_visibility(vis: dict) -> None:
         json.dumps(vis, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
+def load_tab_order() -> list[str]:
+    """Return stored tab order as list of perm keys, or [] for default."""
+    return load_tab_visibility().get("tab_order", [])
+
+def save_tab_order(order: list[str]) -> None:
+    vis = load_tab_visibility()
+    vis["tab_order"] = order
+    save_tab_visibility(vis)
+
+
 def is_tab_visible(perm: str, username: str, role: str) -> bool:
     """Return True if this tab should be shown for this user.
     Developer always sees all permitted tabs.
@@ -1594,7 +1604,7 @@ st.logo(logo,size="large")
 
 TAB_DEFS = [
     ("📋  View All Entries",  "view"),
-    ("📝  Submit / Update",   "submit"),
+    ("📝  Add New Activity",  "submit"),
     ("📤  Import from Excel", "import"),
     ("📥  Export to Excel",   "export"),
     ("📸  Photo Log",         "photos"),
@@ -1603,13 +1613,170 @@ TAB_DEFS = [
 ]
 _sw_username = st.session_state.get("username", "")
 _sw_role     = st.session_state.get("role", "")
-visible   = [
-    (lbl, perm) for lbl, perm in TAB_DEFS
+
+_stored_order = load_tab_order()
+if _stored_order:
+    _tab_dict      = {perm: lbl for lbl, perm in TAB_DEFS}
+    _ordered_perms = _stored_order + [p for p in [t[1] for t in TAB_DEFS]
+                                       if p not in _stored_order]
+    _TAB_DEFS_ORDERED = [(_tab_dict[p], p) for p in _ordered_perms if p in _tab_dict]
+else:
+    _TAB_DEFS_ORDERED = TAB_DEFS
+
+visible = [
+    (lbl, perm) for lbl, perm in _TAB_DEFS_ORDERED
     if has_permission(perm)
     and is_tab_visible(perm, _sw_username, _sw_role)
 ]
 tab_objs  = st.tabs([lbl for lbl, _ in visible])
 tab_index = {perm: tab_objs[i] for i, (_, perm) in enumerate(visible)}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GANTT CHART BUILDER — reusable SVG generator
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_gantt_svg(activities: list[dict], report_date=None,
+                    title: str = "") -> str:
+    """
+    Build a Gantt chart SVG string from a list of activity dicts.
+    Each dict needs: activity_id, activity_name, activity_status,
+                     actual_start, actual_finish, predicted_start,
+                     remaining_dur
+    Returns an SVG string or "" if no bars can be drawn.
+    """
+    from datetime import timedelta as _td2
+
+    _today2 = date.today()
+    _COLOURS2 = {
+        "Completed":   "#16a34a",
+        "In Progress": "#d97706",
+        "Not Started": "#6b7280",
+    }
+
+    bars = []
+    for act in activities:
+        status = act.get("activity_status","")
+        start = end = None
+        if status == "Completed":
+            s = iso_to_dt(act.get("actual_start",""))
+            e = iso_to_dt(act.get("actual_finish",""))
+            if s: start = s.date()
+            if e: end   = e.date()
+        elif status == "In Progress":
+            rpt = report_date or _today2
+            start = rpt
+            try:    rem = int(float(act.get("remaining_dur","0") or 0))
+            except: rem = 0
+            end = _add_working_days(rpt, rem)
+        elif status == "Not Started":
+            p = iso_to_dt(act.get("predicted_start",""))
+            if p:
+                start = p.date()
+                try:    rem = int(float(act.get("remaining_dur","0") or 0))
+                except: rem = 0
+                end = _add_working_days(start, rem)
+        if start and end and end >= start:
+            bars.append({
+                "aid":    act.get("activity_id",""),
+                "name":   act.get("activity_name",""),
+                "status": status,
+                "start":  start,
+                "end":    end,
+            })
+
+    if not bars:
+        return ""
+
+    all_starts   = [b["start"] for b in bars]
+    all_ends     = [b["end"]   for b in bars]
+    chart_start  = min(all_starts)
+    chart_end    = max(all_ends)
+    total_days   = max((chart_end - chart_start).days + 1, 1)
+
+    BAR_H   = 36;  ROW_GAP  = 10
+    LABEL_W = 180; CHART_W  = 500
+    HEADER_H= 52;  ROW_H    = BAR_H + ROW_GAP
+    SVG_H   = HEADER_H + len(bars) * ROW_H + 20
+    SVG_W   = LABEL_W + CHART_W + 10
+    MAX_CH  = 24
+
+    def _xg(d):
+        return LABEL_W + int(((d - chart_start).days / total_days) * CHART_W)
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{SVG_W}" height="{SVG_H}" '
+        f'style="font-family:Arial,sans-serif;background:#f8f9fb">',
+        f'<defs><clipPath id="lc2"><rect x="0" y="0" width="{LABEL_W-4}" height="{SVG_H}"/>'
+        f'</clipPath></defs>',
+    ]
+    if title:
+        parts.append(
+            f'<text x="{SVG_W//2}" y="16" font-size="11" fill="#1C3557" '
+            f'font-weight="bold" text-anchor="middle">{title}</text>'
+        )
+
+    # Separator
+    parts.append(f'<line x1="{LABEL_W}" y1="0" x2="{LABEL_W}" y2="{SVG_H}" '
+                 f'stroke="#d1d5db" stroke-width="1"/>')
+
+    # Grid + date labels
+    MIN_GAP   = 55
+    last_lx   = -999
+    cur       = chart_start
+    while cur <= chart_end:
+        if cur.weekday() == 0:
+            gx = _xg(cur)
+            parts.append(f'<line x1="{gx}" y1="{HEADER_H}" x2="{gx}" y2="{SVG_H}" '
+                         f'stroke="#e2e8f0" stroke-width="1"/>')
+            if gx - last_lx >= MIN_GAP:
+                parts.append(f'<text x="{gx+2}" y="{HEADER_H-4}" font-size="9" '
+                              f'fill="#94a3b8">{cur.strftime("%d %b")}</text>')
+                last_lx = gx
+        cur += _td2(days=1)
+
+    # Bars
+    for bi, bar in enumerate(bars):
+        y   = HEADER_H + bi * ROW_H + ROW_GAP // 2
+        x1  = _xg(bar["start"])
+        x2  = _xg(bar["end"])
+        bw  = max(x2 - x1, 4)
+        col = _COLOURS2.get(bar["status"], "#6b7280")
+        bg  = "#eef2f8" if bi % 2 == 0 else "#ffffff"
+        parts.append(f'<rect x="0" y="{y}" width="{SVG_W}" height="{BAR_H}" fill="{bg}"/>')
+        name = bar["name"]
+        if len(name) <= MAX_CH:
+            parts.append(f'<text x="4" y="{y+BAR_H//2+4}" font-size="10" fill="#1C3557" '
+                         f'font-weight="bold" clip-path="url(#lc2)">{name}</text>')
+        else:
+            mid   = MAX_CH
+            split = name.rfind(" ", 0, mid) or mid
+            l1    = name[:split].strip()
+            l2    = (name[split:].strip())[:MAX_CH-1] + ("…" if len(name[split:].strip()) > MAX_CH-1 else "")
+            parts.append(f'<text x="4" y="{y+BAR_H//2-3}" font-size="10" fill="#1C3557" '
+                         f'font-weight="bold" clip-path="url(#lc2)">{l1}</text>')
+            parts.append(f'<text x="4" y="{y+BAR_H//2+10}" font-size="10" fill="#1C3557" '
+                         f'font-weight="bold" clip-path="url(#lc2)">{l2}</text>')
+        parts.append(f'<rect x="{x1}" y="{y+3}" width="{bw}" height="{BAR_H-6}" rx="3" '
+                     f'fill="{col}" opacity="0.85"/>')
+
+    # Overlay lines
+    if chart_start <= _today2 <= chart_end:
+        tx = _xg(_today2)
+        parts.append(f'<line x1="{tx}" y1="0" x2="{tx}" y2="{SVG_H}" '
+                     f'stroke="#ef4444" stroke-width="2" stroke-dasharray="4,3"/>')
+        parts.append(f'<text x="{tx+2}" y="{HEADER_H//2}" font-size="9" '
+                     f'fill="#ef4444" font-weight="bold">Today</text>')
+    if report_date and chart_start <= report_date <= chart_end:
+        rx = _xg(report_date)
+        parts.append(f'<line x1="{rx}" y1="0" x2="{rx}" y2="{SVG_H}" '
+                     f'stroke="#1d4ed8" stroke-width="2" stroke-dasharray="6,3"/>')
+        parts.append(f'<text x="{rx+2}" y="{HEADER_H//2+12}" font-size="9" '
+                     f'fill="#1d4ed8" font-weight="bold">Data date</text>')
+
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB: VIEW ALL ENTRIES
@@ -1833,236 +2000,325 @@ if "view" in tab_index:
             st.dataframe(sorted_entries)
     
     # ══════════════════════════════════════════════════════════════════════════════
-    # TAB: SUBMIT / UPDATE
+    # TAB: Add new activity
     # ══════════════════════════════════════════════════════════════════════════════
     
 if "submit" in tab_index:
     with tab_index["submit"]:
-        entries   = load_entries()
-        known_ids = {e["activity_id"].upper(): e for e in entries}
-
-        st.subheader("Submit or Update an Asbuilt Entry")
-
-        # ── Project selector ───────────────────────────────────────────────
-        _all_projects_submit = get_accessible_projects(
-            st.session_state.get("username", ""), get_all_projects(entries)
-        )
-        _proj_options_submit = _all_projects_submit + ["＋ New project…"]
         _sel_project = st.session_state.get("selected_project", "")
-        _default_proj = _sel_project if _sel_project in _all_projects_submit else (
-            _all_projects_submit[0] if _all_projects_submit else None
+
+        st.subheader("➕ Add New Activity Request")
+        st.write(
+            "Use this form to request a new activity be added to the project. "
+            "A notification will be sent to the project admins who will add it "
+            "to Primavera P6 and import it."
         )
-        _proj_idx = _proj_options_submit.index(_default_proj) if _default_proj in _proj_options_submit else 0
+        if not _sel_project:
+            st.warning("Select a project in the sidebar first.")
+            st.stop()
 
-        if not _all_projects_submit:
-            st.info("No projects yet — enter a WBS below and one will be created automatically.")
-            submit_project = ""
-        else:
-            _proj_choice = st.selectbox(
-                "Project *",
-                options=_proj_options_submit,
-                index=_proj_idx,
-                key="submit_project_select",
-            )
-            if _proj_choice == "＋ New project…":
-                submit_project = st.text_input(
-                    "New project name",
-                    placeholder="e.g. ProjectB",
-                    key="submit_new_project_name",
-                ).strip()
-            else:
-                submit_project = _proj_choice
-
-        st.caption("Enter the Activity ID — if it already exists the name is filled automatically.")
-
-        col_id, col_wbs = st.columns(2)
-        with col_id:
-            activity_id_raw = st.text_input("Activity ID *", placeholder="e.g. A1000").strip()
-
-        # Scope lookup to the selected project for accurate existing detection
-        _project_entries = filter_by_project(entries, submit_project) if submit_project else entries
-        _project_known   = {e["activity_id"].upper(): e for e in _project_entries}
-        existing = _project_known.get(activity_id_raw.upper()) if activity_id_raw else None
-
-        with col_wbs:
-            if existing:
-                # Pre-fill from stored entry — show just the numeric part for clarity
-                _stored_numeric = strip_wbs_prefix(existing.get("wbs_id", ""))
-                wbs_numeric = st.text_input(
-                    "WBS (numeric part) *",
-                    value=_stored_numeric,
-                    placeholder="e.g. 1.2.3",
-                    key="submit_wbs_input",
-                ).strip()
-            else:
-                wbs_numeric = st.text_input(
-                    "WBS (numeric part) *",
-                    placeholder="e.g. 1.2.3",
-                    key="submit_wbs_input",
-                ).strip()
-
-        # Build full WBS with project prefix
-        wbs_input = make_wbs_with_project(submit_project, wbs_numeric) if wbs_numeric else ""
-        if wbs_input and submit_project and submit_project != "(Unassigned)":
-            st.caption(f"Full WBS will be stored as: **{wbs_input}**")
-        if existing:
-            st.info(
-                f"**Existing entry found:** {existing['activity_name']}  \n"
-                f"Status: **{existing['activity_status']}** | "
-                f"**{existing.get('pct_complete', 0)}%** complete  \n"
-                f"Submitting will **update** this entry.", icon="ℹ️",
-            )
-
-        if existing:
-            st.text_input("Activity Name", value=existing["activity_name"], disabled=True)
-            activity_name = existing["activity_name"]
-        else:
-            activity_name = st.text_input(
-                "Activity Name *", placeholder="e.g. Concrete Pour - Foundations"
-            ).strip()
-
-        activity_status = st.selectbox("Activity Status *", STATUS_OPTIONS)
-
-        def _existing_dt(key: str) -> datetime | None:
-            return iso_to_dt(existing.get(key, "")) if existing else None
-
-        actual_start_dt  = None
-        actual_finish_dt = None
-        pct_complete     = 0
-        remaining_dur    = 0
-
-        if activity_status == "Not Started":
-            st.info(
-                "% Complete is set to 0 automatically "
-                "for 'Not Started' activities.", icon="ℹ️"
-            )
-
-        elif activity_status == "In Progress":
-            actual_start_dt = datetime_inputs(
-                "Actual Start *", key="start_ip", required=True,
-                default_dt=_existing_dt("actual_start"),
-            )
-            col_p, col_r = st.columns(2)
-            with col_r:
-                remaining_dur = st.text_input(
-                    "Remaining Duration (days) *", placeholder="e.g. 5",
-                    value=existing.get("remaining_dur", "") if existing else "",
-                ).strip()
-
-            # Calculate suggested pct from report date if available
-            _rpt_date_submit = get_report_date(submit_project) if submit_project else None
-            _suggested_pct   = None
-            _exp_finish_disp = None
-            if _rpt_date_submit and remaining_dur and actual_start_dt:
-                _ef = expected_finish_date(_rpt_date_submit, remaining_dur)
-                if _ef:
-                    _exp_finish_disp = _ef.strftime("%d/%m/%Y")
-                    _suggested_pct   = calc_duration_pct(
-                        dt_to_iso(actual_start_dt), _ef, _rpt_date_submit
-                    )
-
-            with col_p:
-                _pct_default = _suggested_pct if _suggested_pct is not None else (
-                    int(existing.get("pct_complete") or 0) if existing else 0
-                )
-                pct_complete = st.number_input(
-                    "Duration % Complete *", min_value=0, max_value=99, step=5,
-                    value=_pct_default,
-                )
-                if _suggested_pct is not None:
-                    st.caption(
-                        f"💡 Calculated from report date: **{_suggested_pct}%**"
-                        + (f"  ·  Expected finish: **{_exp_finish_disp}**"
-                           if _exp_finish_disp else "")
-                    )
-                elif not _rpt_date_submit and submit_project:
-                    st.caption("ℹ️ Set a report date in the sidebar to auto-calculate %.")
-
-        elif activity_status == "Completed":
-            actual_start_dt = datetime_inputs(
-                "Actual Start *", key="start_c", required=True,
-                default_dt=_existing_dt("actual_start"),
-            )
-            actual_finish_dt = datetime_inputs(
-                "Actual Finish *", key="finish_c", required=True,
-                default_dt=_existing_dt("actual_finish"),
-            )
-            pct_complete  = 100
-            remaining_dur = 0
-            st.info("% Complete set to 100 and Remaining Duration to 0 automatically.", icon="✅")
-
-        # ── Comments section ──────────────────────────────────────────────
+        st.caption(f"Project: **{_sel_project}**")
         st.divider()
-        st.subheader("Comments")
 
-        existing_comments = existing.get("_comments", []) if existing else []
-        if existing_comments:
-            st.caption(f"{len(existing_comments)} existing comment{'s' if len(existing_comments) != 1 else ''} stored for this activity:")
-            for c in existing_comments:
-                st.write(f"**{c['at']}** — {c['by']}")
-                st.write(c["text"])
-                st.divider()
-
-        new_comment_text = st.text_area(
-            "Add a new comment (optional)",
-            placeholder="Enter progress notes, observations, or issues...",
-            height=120,
-            key="submit_new_comment",
+        # ── Core fields ───────────────────────────────────────────────────────
+        _today       = date.today()
+        
+        req_name = st.text_input(
+            "Activity Name *",
+            placeholder="e.g. Concrete Pour — Level 3 Slab",
+            key="req_activity_name",
         ).strip()
 
-        if st.button("Submit Entry", type="primary"):
-            errors = []
-            if not activity_id_raw:                                                      errors.append("Activity ID is required.")
-            if not wbs_input:                                                            errors.append("WBS ID is required.")
-            if not existing and not activity_name:                                       errors.append("Activity Name is required for new activities.")
-            if activity_status in ("In Progress", "Completed") and not actual_start_dt: errors.append("Actual Start is required.")
-            if activity_status == "Completed" and not actual_finish_dt:                  errors.append("Actual Finish is required when status is Completed.")
-            if activity_status == "In Progress" and not remaining_dur:                   errors.append("Remaining Duration is required when In Progress.")
-            if actual_start_dt and actual_finish_dt and actual_finish_dt < actual_start_dt:
-                errors.append("Actual Finish cannot be before Actual Start.")
+        req_type = st.text_input(
+            "Type of Activity *",
+            placeholder="e.g. RFI, Rework, Resubmittal, Variation, NCR",
+            key="req_activity_type",
+        ).strip()
 
-            if errors:
-                for e in errors:
+        req_area = st.text_input(
+            "Area of Work *",
+            placeholder="e.g. North Wing, Level 3, Grid C-D",
+            key="req_area",
+        ).strip()
+
+        req_status = st.selectbox(
+            "Status *",
+            STATUS_OPTIONS,
+            key="req_status",
+        )
+        
+
+        rq_start_dt = rq_finish_dt = None
+        rq_pct = 0
+        rq_rem = 0
+        
+
+
+        if req_status == "Not Started":
+            st.info("% Complete set to 0 automatically.", icon="ℹ️")
+            rq_exp = st.text_input(
+                    "Expected Duration (days) *",
+                    value=str(""),
+                    placeholder="e.g. 5",
+                    key="req_status_NS"
+                    ).strip()
+                        
+        elif req_status == "Completed":
+            rq_start_dt = datetime_inputs(
+                "Actual Start *", key="rq_start", required=True,
+                default_dt=_today,
+            )
+            rq_finish_dt = datetime_inputs(
+                "Actual Finish *", key="rq_finish", required=True,
+                default_dt=_today,
+            )
+            rq_pct = 100
+            rq_rem = "0"
+            st.info("% Complete set to 100, Remaining to 0.", icon="✅")    
+            
+        elif req_status == "In Progress":
+                rq_start_dt = datetime_inputs(
+                    "Actual Start *", key="req_status_IP")
+        
+                # ── Input mode selector ───────────────────────────────
+                _ip_mode = st.radio(
+                "Update by",
+                ["% Complete", "Remaining Duration", "Expected Finish",
+                 "Physical % Complete"],
+                horizontal=True,
+                key="rq_ip_mode",
+                )
+
+                rq_pct = int(0)
+                rq_rem = str("")
+                _rpt = _today
+
+                if _ip_mode == "% Complete":
+                    rq_pct = st.number_input(
+                        "Duration % Complete *",
+                        min_value=0, max_value=99, step=5,
+                        value=rq_pct,
+                        key="rq_pct",
+                        )
+                    if rq_start_dt and rq_pct > 0:
+                        _elapsed  = working_days_between(rq_start_dt.date(), _rpt) + 1
+                        _total    = int(_elapsed / (rq_pct / 100))
+                        _rem_calc = max(0, _total - _elapsed)
+                        rq_rem    = str(_rem_calc)
+                        _ef_calc  = _add_working_days(_rpt, _rem_calc)
+                        st.caption(
+                            f"💡 Remaining: **{_rem_calc} days**  ·  "
+                            f"Expected finish: **{_ef_calc.strftime('%d/%m/%Y')}**"
+                        )
+    
+                elif _ip_mode == "Remaining Duration":
+                    rq_rem = st.text_input(
+                        "Remaining Duration (days) *",
+                        value=rq_rem,
+                        placeholder="e.g. 5",
+                        key="rq_rem",
+                        ).strip()
+                    if rq_rem and rq_start_dt:
+                        _ef_calc  = expected_finish_date(_rpt, rq_rem)
+                        _pct_calc = calc_duration_pct(
+                            dt_to_iso(rq_start_dt), _ef_calc, _rpt
+                        ) if _ef_calc else None
+                        rq_pct = _pct_calc if _pct_calc is not None else rq_pct
+                        if _ef_calc:
+                            st.caption(
+                                f"💡 % Complete: **{rq_pct}%**  ·  "
+                                f"Expected finish: **{_ef_calc.strftime('%d/%m/%Y')}**"
+                            )
+        
+                elif _ip_mode == "Expected Finish":
+                    _cur_ef = _add_working_days(
+                        _rpt, int(float(rq_rem)) if rq_rem else 0
+                    ) if rq_rem else _rpt
+                    _ef_input = st.date_input(
+                        "Expected Finish *",
+                        value=_cur_ef,
+                        format="DD/MM/YYYY",
+                        key="rq_ef",
+                    )
+                    _rem_calc = working_days_between(_rpt, _ef_input)
+                    rq_rem    = str(_rem_calc)
+                    _pct_calc = calc_duration_pct(
+                        dt_to_iso(rq_start_dt), _ef_input, _rpt
+                    ) if rq_start_dt else None
+                    rq_pct = _pct_calc if _pct_calc is not None else rq_pct
+                    st.caption(
+                        f"💡 Remaining: **{_rem_calc} days**  ·  "
+                        f"% Complete: **{rq_pct}%**"
+                    )
+        
+                else:  # Physical % Complete
+                    st.caption(
+                        "Enter the physical % complete directly. "
+                        "Then select how to specify the remaining schedule."
+                    )
+                    rq_pct = st.number_input(
+                        "Physical % Complete *",
+                        min_value=0, max_value=99, step=1,
+                        value=rq_pct,
+                        key="rq_phys_pct",
+                    )
+                    # Second selector — how to supply remaining schedule info
+                    _phys_sub = st.selectbox(
+                        "Also specify",
+                        ["Remaining Duration", "Expected Finish",
+                         "Duration % Complete"],
+                        key="rq_phys_sub",
+                    )
+                    if _phys_sub == "Remaining Duration":
+                        rq_rem = st.text_input(
+                            "Remaining Duration (days)",
+                            value=rq_rem,
+                            placeholder="e.g. 5",
+                            key="rq_phys_rem",
+                        ).strip()
+                        if rq_rem:
+                            _ef_calc = expected_finish_date(_rpt, rq_rem)
+                            if _ef_calc:
+                                st.caption(
+                                    f"💡 Expected finish: "
+                                    f"**{_ef_calc.strftime('%d/%m/%Y')}**"
+                                )
+        
+                    elif _phys_sub == "Expected Finish":
+                        _cur_ef = _add_working_days(
+                            _rpt, int(float(rq_rem)) if rq_rem else 0
+                        ) if rq_rem else _rpt
+                        _ef_input = st.date_input(
+                            "Expected Finish",
+                            value=_cur_ef,
+                            format="DD/MM/YYYY",
+                            key="rq_phys_ef",
+                        )
+                        _rem_calc = working_days_between(_rpt, _ef_input)
+                        rq_rem    = str(_rem_calc)
+                        st.caption(
+                            f"💡 Remaining: **{_rem_calc} days**"
+                        )
+        
+                    else:  # Duration % Complete
+                        _dur_pct = st.number_input(
+                            "Duration % Complete",
+                            min_value=0, max_value=99, step=5,
+                            value=int(0),
+                            key="rq_phys_dur",
+                        )
+                        if rq_start_dt and _dur_pct > 0:
+                            _elapsed  = working_days_between(
+                                rq_start_dt.date(), _rpt) + 1
+                            _total    = int(_elapsed / (_dur_pct / 100))
+                            _rem_calc = max(0, _total - _elapsed)
+                            rq_rem    = str(_rem_calc)
+                            _ef_calc  = _add_working_days(_rpt, _rem_calc)
+                            st.caption(
+                                f"💡 Remaining: **{_rem_calc} days**  ·  "
+                                f"Expected finish: **{_ef_calc.strftime('%d/%m/%Y')}**"
+                            )
+
+        
+        
+        
+        
+        # ── Comment + attachments ─────────────────────────────────────────────
+        st.divider()
+        st.subheader("Comment & Attachments")
+
+        req_comment = st.text_area(
+            "Comment *",
+            placeholder="Describe the activity, reason for addition, location details, etc.",
+            height=140,
+            key="req_comment",
+        ).strip()
+
+        req_files = st.file_uploader(
+            "Attach supporting files (PDF or images, optional)",
+            type=["pdf","jpg","jpeg","png","webp"],
+            accept_multiple_files=True,
+            key="req_attachments",
+        )
+
+        # ── Submit ────────────────────────────────────────────────────────────
+        st.divider()
+        if st.button("📤  Send Request to Admin", type="primary"):
+            errs = []
+            if not req_name:    errs.append("Activity Name is required.")
+            if not req_type:    errs.append("Type of Activity is required.")
+            if not req_area:    errs.append("Area of Work is required.")
+            if not req_comment: errs.append("Comment is required.")
+            if errs:
+                for e in errs:
                     st.error(e)
             else:
-                # Build updated comment list — prepend new comment if provided
-                updated_comments = list(existing.get("_comments", [])) if existing else []
-                if new_comment_text:
-                    updated_comments.insert(0, {
-                        "text": new_comment_text,
-                        "by":   st.session_state.display_name,
-                        "at":   datetime.now().strftime("%d/%m/%Y %H:%M"),
+                # Save attachments to disk and collect metadata
+                ensure_photo_dir()
+                _att_meta = []
+                for _f in (req_files or []):
+                    _ext  = Path(_f.name).suffix.lower() or ".bin"
+                    _fname = f"req_{uuid.uuid4().hex}{_ext}"
+                    _fpath = PHOTO_DIR / _fname
+                    _fbytes = _f.read()
+                    _fpath.write_bytes(_fbytes)
+                    _att_meta.append({
+                        "original_name": _f.name,
+                        "filename":      _fname,
+                        "size_kb":       round(len(_fbytes) / 1024, 1),
                     })
 
-                entry = {
-                    "activity_id":       activity_id_raw,
-                    "activity_name":     activity_name,
-                    "activity_status":   activity_status,
-                    "actual_start":      dt_to_iso(actual_start_dt)  if actual_start_dt  else "",
-                    "actual_finish":     dt_to_iso(actual_finish_dt) if actual_finish_dt else "",
-                    "pct_complete":      str(pct_complete),
-                    "remaining_dur":     remaining_dur,
-                    "complete_pct_type": "Physical",
-                    "wbs_id":            wbs_input,
-                    "predicted_start":   existing.get("predicted_start", "") if existing else "",
-                    "task_type":         existing.get("task_type", "") if existing else "",
-                    "_comments":         updated_comments,
-                    "_submitted_at":     datetime.now().strftime("%d/%m/%Y %H:%M"),
-                    "_submitted_by":     st.session_state.display_name,
-                }
-                entries, action = upsert_entry(entries, entry)
-                save_entries(entries)
-                icon = "✅" if action == "saved" else "🔄"
-                st.success(f"{icon} Entry **{action}** successfully!")
-                with st.expander("View saved data"):
-                    display = entry.copy()
-                    if display["actual_start"]:  display["actual_start"]  = display_dt(display["actual_start"])
-                    if display["actual_finish"]: display["actual_finish"] = display_dt(display["actual_finish"])
-                    st.json(display)
+                # Build notification body
+                _notif_body = (
+                    f"**New activity request** from "
+                    f"**{st.session_state.display_name}**\n\n"
+                    f"- **Activity Name:** {req_name}\n"
+                    f"- **Type:** {req_type}\n"
+                    f"- **Area:** {req_area}\n"
+                    f"- **Status:** {req_status}\n\n"
+                    f"**Comment:**\n{req_comment}"
+                )
+                if _att_meta:
+                    _notif_body += (
+                        f"\n\n**Attachments ({len(_att_meta)}):** "
+                        + ", ".join(a["original_name"] for a in _att_meta)
+                    )
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB: IMPORT FROM EXCEL
-# ══════════════════════════════════════════════════════════════════════════════
+                create_notification(
+                    created_by  = st.session_state.display_name,
+                    project     = _sel_project,
+                    title       = f"New Activity Request — {req_name} — {_sel_project}",
+                    body        = _notif_body,
+                    rows        = [
+                        {"Field": "Activity Name", "Value": req_name},
+                        {"Field": "Type",          "Value": req_type},
+                        {"Field": "Area of Work",  "Value": req_area},
+                        {"Field": "Status",        "Value": req_status},
+                        {"Field": "remaining Duration", "Value":rq_rem},
+                        {"Field": "Start date", "Value": rq_start_dt.strftime('%Y-%m-%d') if rq_start_dt else None}, 
+                        {"Field": "Actual finish", "Value": rq_finish_dt.strftime('%Y-%m-%d') if rq_start_dt else None}, 
+                        {"Field": "Attachments",   "Value":
+                            ", ".join(a["original_name"] for a in _att_meta)
+                            if _att_meta else "None"},
+                    ],
+                    status      = "info",
+                    recipients  = get_project_admin_recipients(_sel_project),
+                    edits       = {"attachments": _att_meta},
+                )
+
+                st.success(
+                    f"✅ Request sent! Admins for **{_sel_project}** have been notified. "
+                    f"The activity will be added to P6 and imported once approved."
+                )
+                if _att_meta:
+                    st.caption(
+                        f"{len(_att_meta)} file{'s' if len(_att_meta) != 1 else ''} "
+                        f"uploaded: "
+                        + ", ".join(
+                            f"{a['original_name']} ({a['size_kb']} KB)"
+                            for a in _att_meta
+                        )
+                    )
 
 if "import" in tab_index:
     with tab_index["import"]:
@@ -3285,8 +3541,42 @@ if "settings" in tab_index:
                         _edits = notif.get("edits", {})
                         _approved_edits = {}
                         if notif.get("rows"):
-                            st.write("**Proposed changes — edit cells before approving:**")
                             _entries_for_approval = load_entries()
+                            _rpt_dt_apr = get_report_date(notif.get("project",""))
+
+                            # ── Before / After Gantt toggle ───────────────────
+                            if st.toggle("📊 Show Before / After Gantt",
+                                         key=f"apr_gantt_{notif['id']}", value=False):
+                                _before_acts = []
+                                _after_acts  = []
+                                for _row in notif["rows"]:
+                                    _aid  = _row.get("Activity ID","")
+                                    _prop = _edits.get(_aid, {})
+                                    _cur  = next((e for e in _entries_for_approval
+                                                  if e.get("activity_id") == _aid), {})
+                                    _before_acts.append(_cur)
+                                    # After = current with proposed edits merged
+                                    _after_acts.append({**_cur, **_prop})
+
+                                _svg_before = build_gantt_svg(
+                                    _before_acts, _rpt_dt_apr, title="Before"
+                                )
+                                _svg_after  = build_gantt_svg(
+                                    _after_acts,  _rpt_dt_apr, title="After"
+                                )
+                                _gc1, _gc2 = st.columns(2)
+                                with _gc1:
+                                    if _svg_before:
+                                        st.markdown(_svg_before, unsafe_allow_html=True)
+                                    else:
+                                        st.caption("No chart data available.")
+                                with _gc2:
+                                    if _svg_after:
+                                        st.markdown(_svg_after, unsafe_allow_html=True)
+                                    else:
+                                        st.caption("No chart data available.")
+
+                            st.write("**Proposed changes — edit cells before approving:**")
 
                             # Build table rows: one per changed activity
                             _tbl_rows = []
@@ -3432,6 +3722,28 @@ if "settings" in tab_index:
                                 use_container_width=True,
                                 hide_index=True,
                             )
+                        # Attachment download buttons
+                        _att_list = notif.get("edits", {}).get("attachments", [])
+                        if _att_list:
+                            st.write("**Attachments:**")
+                            for _att in _att_list:
+                                _att_path = PHOTO_DIR / _att["filename"]
+                                if _att_path.exists():
+                                    _att_bytes = _att_path.read_bytes()
+                                    _mime = (
+                                        "application/pdf"
+                                        if _att["filename"].endswith(".pdf")
+                                        else "image/jpeg"
+                                    )
+                                    st.download_button(
+                                        label=f"⬇️ {_att['original_name']} ({_att['size_kb']} KB)",
+                                        data=_att_bytes,
+                                        file_name=_att["original_name"],
+                                        mime=_mime,
+                                        key=f"att_dl_{notif['id']}_{_att['filename']}",
+                                    )
+                                else:
+                                    st.caption(f"⚠️ {_att['original_name']} — file not found")
 
                 _tc2.write(notif.get("created_by", "—"))
                 _tc3.write(notif.get("created_at", "—"))
@@ -3456,16 +3768,51 @@ if "settings" in tab_index:
         st.divider()
 
         # ── Rename Project ────────────────────────────────────────────────
-        st.markdown("### Rename Project")
-        st.write(
-            "Renames a project by rewriting the WBS prefix on every activity "
-            "that belongs to it. The new name must exactly match the project "
-            "name in Primavera P6 if you intend to export and re-import."
-        )
 
         _settings_entries = load_entries()
         _settings_projects = get_all_projects(_settings_entries)
         _named_projects = [p for p in _settings_projects if p != "(Unassigned)"]
+
+        # ── Tab Order (developer only) ───────────────────────────────────
+        if has_permission("manage_users"):
+            st.markdown("### 🔀 Tab Order")
+            st.write(
+                "Reorder tabs using the arrows. The first tab in the list is "
+                "shown first. Changes take effect on next page load."
+            )
+            _cur_order = load_tab_order()
+            _all_perms = [perm for _, perm in TAB_DEFS]
+            _display_order = (_cur_order + [p for p in _all_perms
+                                            if p not in _cur_order]
+                              if _cur_order else list(_all_perms))
+            _perm_to_label = {perm: lbl for lbl, perm in TAB_DEFS}
+
+            for _oi, _perm in enumerate(_display_order):
+                _oc1, _oc2, _oc3, _oc4 = st.columns([5, 1, 1, 1])
+                _oc1.write(f"{_oi+1}. {_perm_to_label.get(_perm, _perm)}")
+                with _oc2:
+                    if _oi > 0 and st.button("↑", key=f"tab_up_{_perm}",
+                                              use_container_width=True):
+                        _display_order.insert(_oi-1, _display_order.pop(_oi))
+                        save_tab_order(_display_order)
+                        st.rerun()
+                with _oc3:
+                    if _oi < len(_display_order)-1 and st.button(
+                            "↓", key=f"tab_dn_{_perm}", use_container_width=True):
+                        _display_order.insert(_oi+1, _display_order.pop(_oi))
+                        save_tab_order(_display_order)
+                        st.rerun()
+                with _oc4:
+                    if st.button("⊙", key=f"tab_first_{_perm}",
+                                 use_container_width=True, help="Move to first"):
+                        _display_order.insert(0, _display_order.pop(_oi))
+                        save_tab_order(_display_order)
+                        st.rerun()
+
+            if st.button("↺  Reset to default order", key="tab_order_reset"):
+                save_tab_order([])
+                st.rerun()
+            st.divider()
 
         # ── Tab Visibility ────────────────────────────────────────────────
         st.markdown("### Tab Visibility")
@@ -3481,13 +3828,13 @@ if "settings" in tab_index:
         _tv_changed = False
 
         _TAB_LABELS = {
+            "sitewalk": " Site Walk",
             "view":     "📋 View All Entries",
             "submit":   "📝 Submit / Update",
             "import":   "📤 Import from Excel",
             "export":   "📥 Export to Excel",
             "photos":   "📸 Photo Log",
             "settings": "⚙️ Settings",
-            "sitewalk": " Site Walk",
         }
         _PERM_ORDER = ["view","submit","import","export","photos","settings","sitewalk"]
 
@@ -3616,6 +3963,11 @@ if "settings" in tab_index:
 
         st.divider()
         st.markdown("### Rename Project")
+        st.write(
+            "Renames a project by rewriting the WBS prefix on every activity "
+            "that belongs to it. The new name must exactly match the project "
+            "name in Primavera P6 if you intend to export and re-import."
+        )
 
         if not _named_projects:
             st.info("No named projects found. Projects are identified by the "
@@ -3777,151 +4129,6 @@ if "settings" in tab_index:
                     f"{len(_del_affected)} activities removed."
                 )
                 st.rerun()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# GANTT CHART BUILDER — reusable SVG generator
-# ══════════════════════════════════════════════════════════════════════════════
-
-def build_gantt_svg(activities: list[dict], report_date=None,
-                    title: str = "") -> str:
-    """
-    Build a Gantt chart SVG string from a list of activity dicts.
-    Each dict needs: activity_id, activity_name, activity_status,
-                     actual_start, actual_finish, predicted_start,
-                     remaining_dur
-    Returns an SVG string or "" if no bars can be drawn.
-    """
-    from datetime import timedelta as _td2
-
-    _today2 = date.today()
-    _COLOURS2 = {
-        "Completed":   "#16a34a",
-        "In Progress": "#d97706",
-        "Not Started": "#6b7280",
-    }
-
-    bars = []
-    for act in activities:
-        status = act.get("activity_status","")
-        start = end = None
-        if status == "Completed":
-            s = iso_to_dt(act.get("actual_start",""))
-            e = iso_to_dt(act.get("actual_finish",""))
-            if s: start = s.date()
-            if e: end   = e.date()
-        elif status == "In Progress":
-            rpt = report_date or _today2
-            start = rpt
-            try:    rem = int(float(act.get("remaining_dur","0") or 0))
-            except: rem = 0
-            end = _add_working_days(rpt, rem)
-        elif status == "Not Started":
-            p = iso_to_dt(act.get("predicted_start",""))
-            if p:
-                start = p.date()
-                try:    rem = int(float(act.get("remaining_dur","0") or 0))
-                except: rem = 0
-                end = _add_working_days(start, rem)
-        if start and end and end >= start:
-            bars.append({
-                "aid":    act.get("activity_id",""),
-                "name":   act.get("activity_name",""),
-                "status": status,
-                "start":  start,
-                "end":    end,
-            })
-
-    if not bars:
-        return ""
-
-    all_starts   = [b["start"] for b in bars]
-    all_ends     = [b["end"]   for b in bars]
-    chart_start  = min(all_starts)
-    chart_end    = max(all_ends)
-    total_days   = max((chart_end - chart_start).days + 1, 1)
-
-    BAR_H   = 36;  ROW_GAP  = 10
-    LABEL_W = 180; CHART_W  = 500
-    HEADER_H= 52;  ROW_H    = BAR_H + ROW_GAP
-    SVG_H   = HEADER_H + len(bars) * ROW_H + 20
-    SVG_W   = LABEL_W + CHART_W + 10
-    MAX_CH  = 24
-
-    def _xg(d):
-        return LABEL_W + int(((d - chart_start).days / total_days) * CHART_W)
-
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{SVG_W}" height="{SVG_H}" '
-        f'style="font-family:Arial,sans-serif;background:#f8f9fb">',
-        f'<defs><clipPath id="lc2"><rect x="0" y="0" width="{LABEL_W-4}" height="{SVG_H}"/>'
-        f'</clipPath></defs>',
-    ]
-    if title:
-        parts.append(
-            f'<text x="{SVG_W//2}" y="16" font-size="11" fill="#1C3557" '
-            f'font-weight="bold" text-anchor="middle">{title}</text>'
-        )
-
-    # Separator
-    parts.append(f'<line x1="{LABEL_W}" y1="0" x2="{LABEL_W}" y2="{SVG_H}" '
-                 f'stroke="#d1d5db" stroke-width="1"/>')
-
-    # Grid + date labels
-    MIN_GAP   = 55
-    last_lx   = -999
-    cur       = chart_start
-    while cur <= chart_end:
-        if cur.weekday() == 0:
-            gx = _xg(cur)
-            parts.append(f'<line x1="{gx}" y1="{HEADER_H}" x2="{gx}" y2="{SVG_H}" '
-                         f'stroke="#e2e8f0" stroke-width="1"/>')
-            if gx - last_lx >= MIN_GAP:
-                parts.append(f'<text x="{gx+2}" y="{HEADER_H-4}" font-size="9" '
-                              f'fill="#94a3b8">{cur.strftime("%d %b")}</text>')
-                last_lx = gx
-        cur += _td2(days=1)
-
-    # Bars
-    for bi, bar in enumerate(bars):
-        y   = HEADER_H + bi * ROW_H + ROW_GAP // 2
-        x1  = _xg(bar["start"])
-        x2  = _xg(bar["end"])
-        bw  = max(x2 - x1, 4)
-        col = _COLOURS2.get(bar["status"], "#6b7280")
-        bg  = "#eef2f8" if bi % 2 == 0 else "#ffffff"
-        parts.append(f'<rect x="0" y="{y}" width="{SVG_W}" height="{BAR_H}" fill="{bg}"/>')
-        name = bar["name"]
-        if len(name) <= MAX_CH:
-            parts.append(f'<text x="4" y="{y+BAR_H//2+4}" font-size="10" fill="#1C3557" '
-                         f'font-weight="bold" clip-path="url(#lc2)">{name}</text>')
-        else:
-            mid   = MAX_CH
-            split = name.rfind(" ", 0, mid) or mid
-            l1    = name[:split].strip()
-            l2    = (name[split:].strip())[:MAX_CH-1] + ("…" if len(name[split:].strip()) > MAX_CH-1 else "")
-            parts.append(f'<text x="4" y="{y+BAR_H//2-3}" font-size="10" fill="#1C3557" '
-                         f'font-weight="bold" clip-path="url(#lc2)">{l1}</text>')
-            parts.append(f'<text x="4" y="{y+BAR_H//2+10}" font-size="10" fill="#1C3557" '
-                         f'font-weight="bold" clip-path="url(#lc2)">{l2}</text>')
-        parts.append(f'<rect x="{x1}" y="{y+3}" width="{bw}" height="{BAR_H-6}" rx="3" '
-                     f'fill="{col}" opacity="0.85"/>')
-
-    # Overlay lines
-    if chart_start <= _today2 <= chart_end:
-        tx = _xg(_today2)
-        parts.append(f'<line x1="{tx}" y1="0" x2="{tx}" y2="{SVG_H}" '
-                     f'stroke="#ef4444" stroke-width="2" stroke-dasharray="4,3"/>')
-        parts.append(f'<text x="{tx+2}" y="{HEADER_H//2}" font-size="9" '
-                     f'fill="#ef4444" font-weight="bold">Today</text>')
-    if report_date and chart_start <= report_date <= chart_end:
-        rx = _xg(report_date)
-        parts.append(f'<line x1="{rx}" y1="0" x2="{rx}" y2="{SVG_H}" '
-                     f'stroke="#1d4ed8" stroke-width="2" stroke-dasharray="6,3"/>')
-        parts.append(f'<text x="{rx+2}" y="{HEADER_H//2+12}" font-size="9" '
-                     f'fill="#1d4ed8" font-weight="bold">Data date</text>')
-
-    parts.append("</svg>")
-    return "".join(parts)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4463,8 +4670,8 @@ if "sitewalk" in tab_index:
                     sw_pct = 0
                     sw_rem = 0
 
-                    if new_status == "Not Started":
-                        st.info("% Complete and Remaining Duration set to 0 automatically.", icon="ℹ️")
+                    if new_status == "Not Started" or new_status == "In Progress":
+                        st.info("% Complete set to 0 automatically.", icon="ℹ️")
                         sw_rem = st.text_input(
                             "Remaining Duration (days) *",
                             value=str(merged.get("remaining_dur","") or ""),
@@ -4477,34 +4684,146 @@ if "sitewalk" in tab_index:
                             "Actual Start *", key=f"sw_start_{aid}", required=True,
                             default_dt=iso_to_dt(merged.get("actual_start","")),
                         )
-                        c_p, c_r = st.columns(2)
-                        with c_r:
-                            sw_rem = st.text_input(
-                                "Remaining Duration (days) *",
-                                value=str(merged.get("remaining_dur","") or ""),
-                                placeholder="e.g. 5",
-                                key=f"sw_rem_{aid}",
-                            ).strip()
 
-                        # Suggested pct from report date
-                        _sw_suggested = None
-                        if _rpt_date_sw and sw_rem and sw_start_dt:
-                            _sw_ef = expected_finish_date(_rpt_date_sw, sw_rem)
-                            if _sw_ef:
-                                _sw_suggested = calc_duration_pct(
-                                    dt_to_iso(sw_start_dt), _sw_ef, _rpt_date_sw
-                                )
-                        with c_p:
-                            _sw_pct_default = _sw_suggested if _sw_suggested is not None else \
-                                              int(merged.get("pct_complete") or 0)
+                        # ── Input mode selector ───────────────────────────────
+                        _ip_mode = st.radio(
+                            "Update by",
+                            ["% Complete", "Remaining Duration", "Expected Finish",
+                             "Physical % Complete"],
+                            horizontal=True,
+                            key=f"sw_ip_mode_{aid}",
+                        )
+
+                        sw_pct = int(merged.get("pct_complete") or 0)
+                        sw_rem = str(merged.get("remaining_dur","") or "")
+
+                        _rpt = _rpt_date_sw or _today
+
+                        if _ip_mode == "% Complete":
                             sw_pct = st.number_input(
                                 "Duration % Complete *",
                                 min_value=0, max_value=99, step=5,
-                                value=_sw_pct_default,
+                                value=sw_pct,
                                 key=f"sw_pct_{aid}",
                             )
-                            if _sw_suggested is not None:
-                                st.caption(f"💡 Calculated: **{_sw_suggested}%**")
+                            if sw_start_dt and sw_pct > 0:
+                                _elapsed  = working_days_between(sw_start_dt.date(), _rpt) + 1
+                                _total    = int(_elapsed / (sw_pct / 100))
+                                _rem_calc = max(0, _total - _elapsed)
+                                sw_rem    = str(_rem_calc)
+                                _ef_calc  = _add_working_days(_rpt, _rem_calc)
+                                st.caption(
+                                    f"💡 Remaining: **{_rem_calc} days**  ·  "
+                                    f"Expected finish: **{_ef_calc.strftime('%d/%m/%Y')}**"
+                                )
+
+                        elif _ip_mode == "Remaining Duration":
+                            sw_rem = st.text_input(
+                                "Remaining Duration (days) *",
+                                value=sw_rem,
+                                placeholder="e.g. 5",
+                                key=f"sw_rem_{aid}",
+                            ).strip()
+                            if sw_rem and sw_start_dt:
+                                _ef_calc  = expected_finish_date(_rpt, sw_rem)
+                                _pct_calc = calc_duration_pct(
+                                    dt_to_iso(sw_start_dt), _ef_calc, _rpt
+                                ) if _ef_calc else None
+                                sw_pct = _pct_calc if _pct_calc is not None else sw_pct
+                                if _ef_calc:
+                                    st.caption(
+                                        f"💡 % Complete: **{sw_pct}%**  ·  "
+                                        f"Expected finish: **{_ef_calc.strftime('%d/%m/%Y')}**"
+                                    )
+
+                        elif _ip_mode == "Expected Finish":
+                            _cur_ef = _add_working_days(
+                                _rpt, int(float(sw_rem)) if sw_rem else 0
+                            ) if sw_rem else _rpt
+                            _ef_input = st.date_input(
+                                "Expected Finish *",
+                                value=_cur_ef,
+                                format="DD/MM/YYYY",
+                                key=f"sw_ef_{aid}",
+                            )
+                            _rem_calc = working_days_between(_rpt, _ef_input)
+                            sw_rem    = str(_rem_calc)
+                            _pct_calc = calc_duration_pct(
+                                dt_to_iso(sw_start_dt), _ef_input, _rpt
+                            ) if sw_start_dt else None
+                            sw_pct = _pct_calc if _pct_calc is not None else sw_pct
+                            st.caption(
+                                f"💡 Remaining: **{_rem_calc} days**  ·  "
+                                f"% Complete: **{sw_pct}%**"
+                            )
+
+                        else:  # Physical % Complete
+                            st.caption(
+                                "Enter the physical % complete directly. "
+                                "Then select how to specify the remaining schedule."
+                            )
+                            sw_pct = st.number_input(
+                                "Physical % Complete *",
+                                min_value=0, max_value=99, step=1,
+                                value=sw_pct,
+                                key=f"sw_phys_pct_{aid}",
+                            )
+                            # Second selector — how to supply remaining schedule info
+                            _phys_sub = st.selectbox(
+                                "Also specify",
+                                ["Remaining Duration", "Expected Finish",
+                                 "Duration % Complete"],
+                                key=f"sw_phys_sub_{aid}",
+                            )
+                            if _phys_sub == "Remaining Duration":
+                                sw_rem = st.text_input(
+                                    "Remaining Duration (days)",
+                                    value=sw_rem,
+                                    placeholder="e.g. 5",
+                                    key=f"sw_phys_rem_{aid}",
+                                ).strip()
+                                if sw_rem:
+                                    _ef_calc = expected_finish_date(_rpt, sw_rem)
+                                    if _ef_calc:
+                                        st.caption(
+                                            f"💡 Expected finish: "
+                                            f"**{_ef_calc.strftime('%d/%m/%Y')}**"
+                                        )
+
+                            elif _phys_sub == "Expected Finish":
+                                _cur_ef = _add_working_days(
+                                    _rpt, int(float(sw_rem)) if sw_rem else 0
+                                ) if sw_rem else _rpt
+                                _ef_input = st.date_input(
+                                    "Expected Finish",
+                                    value=_cur_ef,
+                                    format="DD/MM/YYYY",
+                                    key=f"sw_phys_ef_{aid}",
+                                )
+                                _rem_calc = working_days_between(_rpt, _ef_input)
+                                sw_rem    = str(_rem_calc)
+                                st.caption(
+                                    f"💡 Remaining: **{_rem_calc} days**"
+                                )
+
+                            else:  # Duration % Complete
+                                _dur_pct = st.number_input(
+                                    "Duration % Complete",
+                                    min_value=0, max_value=99, step=5,
+                                    value=int(merged.get("pct_complete") or 0),
+                                    key=f"sw_phys_dur_{aid}",
+                                )
+                                if sw_start_dt and _dur_pct > 0:
+                                    _elapsed  = working_days_between(
+                                        sw_start_dt.date(), _rpt) + 1
+                                    _total    = int(_elapsed / (_dur_pct / 100))
+                                    _rem_calc = max(0, _total - _elapsed)
+                                    sw_rem    = str(_rem_calc)
+                                    _ef_calc  = _add_working_days(_rpt, _rem_calc)
+                                    st.caption(
+                                        f"💡 Remaining: **{_rem_calc} days**  ·  "
+                                        f"Expected finish: **{_ef_calc.strftime('%d/%m/%Y')}**"
+                                    )
 
                     elif new_status == "Completed":
                         sw_start_dt = datetime_inputs(
@@ -4560,7 +4879,9 @@ if "sitewalk" in tab_index:
                         )
                         inject_camera_uploader(f"sw_photo_file_{aid}")
                         if sw_photo_file:
+                            # Read once and cache — reused in upload block below
                             _sw_fb = sw_photo_file.read()
+                            st.session_state[f"sw_photo_bytes_{aid}"] = _sw_fb
                             if _PILLOW:
                                 _sw_prev = ImageOps.exif_transpose(
                                     Image.open(io.BytesIO(_sw_fb))
@@ -4597,11 +4918,9 @@ if "sitewalk" in tab_index:
 
                             # Upload and assign photo if provided
                             if sw_photo_file:
-                                _sw_fb = sw_photo_file.read() if sw_photo_file.size > 0 else                                          st.session_state.get(f"sw_photo_bytes_{aid}", b"")
-                                if not _sw_fb:
-                                    # file_uploader was already read in preview — get from session
-                                    pass
-                                else:
+                                # Use cached bytes from preview (file stream already consumed)
+                                _sw_fb = st.session_state.get(f"sw_photo_bytes_{aid}", b"")
+                                if _sw_fb:
                                     _sw_record = upload_photo(
                                         photo_date    = sw_photo_date,
                                         comment       = sw_photo_comment or f"Site walk — {aid}",
@@ -4609,11 +4928,20 @@ if "sitewalk" in tab_index:
                                         original_name = sw_photo_file.name,
                                         uploaded_by   = st.session_state.display_name,
                                     )
-                                    # Assign to this activity
+                                    # Assign to this activity — pass wbs_id explicitly
+                                    # so the assignment is stored with the correct project
+                                    _sw_wbs = act.get("wbs_id", "")
+                                    _sw_entries_with_wbs = [
+                                        e for e in load_entries()
+                                        if e.get("activity_id","").upper() == aid.upper()
+                                        and e.get("wbs_id","") == _sw_wbs
+                                    ]
+                                    if not _sw_entries_with_wbs:
+                                        _sw_entries_with_wbs = [act]
                                     assign_photo(
                                         _sw_record["id"], [aid],
                                         st.session_state.display_name,
-                                        load_entries(),
+                                        _sw_entries_with_wbs,
                                     )
                                     # Invalidate photo caches
                                     load_image_bytes.clear()
