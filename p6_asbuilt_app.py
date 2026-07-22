@@ -99,9 +99,10 @@ PERMISSIONS = {
     "viewer":    {"view"},
     "engineer":  {"view", "submit", "import", "photos", "sitewalk"},
     "admin":     {"view", "submit", "import", "export", "photos",
-                  "settings", "sitewalk"},
-    "developer": {"view", "submit", "import", "export", "photos",
                   "settings", "sitewalk", "manage_users"},
+    "developer": {"view", "submit", "import", "export", "photos",
+                  "settings", "sitewalk", "manage_users",
+                  "tab_order", "tab_visibility"},
 }
 
 def has_permission(perm: str) -> bool:
@@ -1062,6 +1063,22 @@ def set_allowed_users(project: str, usernames: list[str]) -> None:
     settings.setdefault(project, {})["allowed_users"] = usernames
     save_project_settings(settings)
 
+def auto_assign_new_projects(username: str,
+                              before_projects: set[str],
+                              after_entries: list[dict]) -> None:
+    """
+    After saving entries, detect any newly created projects (present in
+    after_entries but not in before_projects) and automatically assign
+    the creating user to them.
+    Skips (Unassigned) and projects that already have explicit access rules.
+    """
+    after_projects = set(get_all_projects(after_entries))
+    new_projects   = after_projects - before_projects - {"(Unassigned)"}
+    for proj in new_projects:
+        existing = get_allowed_users(proj)
+        if not existing:   # no rules yet — set the creator as sole allowed user
+            set_allowed_users(proj, [username])
+
 def user_can_access_project(username: str, project: str) -> bool:
     """Return True if username is allowed to access project.
     If allowed_users is empty, all users are permitted (no restriction set).
@@ -1596,8 +1613,16 @@ with st.sidebar:
 # HEADER & DYNAMIC TABS
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.title("🏗️ Primavera P6 — Asbuilt Data Collector")
-st.caption("Submit and update asbuilt progress entries, then export a P6-compatible spreadsheet.")
+#st.title("🏗️ Primavera P6 — Asbuilt Data Collector")
+
+st.session_state["selected_project"] = st.selectbox(
+    "📁 Project",
+    options=_projects if _projects else ["— No projects —"],
+    index=_projects.index(st.session_state["selected_project"])
+          if st.session_state["selected_project"] in _projects else 0,
+    key="title_project_select",
+)
+_sel_project = st.session_state["selected_project"]
 st.divider()
 logo=Path("Tricertus_logo.jpg")
 st.logo(logo,size="large")
@@ -2081,9 +2106,9 @@ if "submit" in tab_index:
                     "Actual Start *", key="req_status_IP")
         
                 # ── Input mode selector ───────────────────────────────
-                _ip_mode = st.radio(
+                _ip_mode_rq = st.radio(
                 "Update by",
-                ["% Complete", "Remaining Duration", "Expected Finish",
+                ["Duration % Complete", "Remaining Duration", "Expected Finish",
                  "Physical % Complete"],
                 horizontal=True,
                 key="rq_ip_mode",
@@ -2093,7 +2118,7 @@ if "submit" in tab_index:
                 rq_rem = str("")
                 _rpt = _today
 
-                if _ip_mode == "% Complete":
+                if _ip_mode_rq == "Duration % Complete":
                     rq_pct = st.number_input(
                         "Duration % Complete *",
                         min_value=0, max_value=99, step=5,
@@ -2111,7 +2136,7 @@ if "submit" in tab_index:
                             f"Expected finish: **{_ef_calc.strftime('%d/%m/%Y')}**"
                         )
     
-                elif _ip_mode == "Remaining Duration":
+                elif _ip_mode_rq == "Remaining Duration":
                     rq_rem = st.text_input(
                         "Remaining Duration (days) *",
                         value=rq_rem,
@@ -2130,7 +2155,7 @@ if "submit" in tab_index:
                                 f"Expected finish: **{_ef_calc.strftime('%d/%m/%Y')}**"
                             )
         
-                elif _ip_mode == "Expected Finish":
+                elif _ip_mode_rq == "Expected Finish":
                     _cur_ef = _add_working_days(
                         _rpt, int(float(rq_rem)) if rq_rem else 0
                     ) if rq_rem else _rpt
@@ -2769,7 +2794,12 @@ if "import" in tab_index:
                             })
                             added += 1
 
+                        _before_projs_msp = set(get_all_projects(load_entries()))
                         save_entries(entries)
+                        auto_assign_new_projects(
+                            st.session_state.get("username",""),
+                            _before_projs_msp, entries
+                        )
                         msg = "MSP import complete:"
                         if updated:          msg += f" **{updated}** auto-matched updated"
                         if manually_updated: msg += f", **{manually_updated}** manually overwritten"
@@ -3774,7 +3804,7 @@ if "settings" in tab_index:
         _named_projects = [p for p in _settings_projects if p != "(Unassigned)"]
 
         # ── Tab Order (developer only) ───────────────────────────────────
-        if has_permission("manage_users"):
+        if has_permission("tab_order"):
             st.markdown("### 🔀 Tab Order")
             st.write(
                 "Reorder tabs using the arrows. The first tab in the list is "
@@ -3815,13 +3845,14 @@ if "settings" in tab_index:
             st.divider()
 
         # ── Tab Visibility ────────────────────────────────────────────────
-        st.markdown("### Tab Visibility")
-        st.write(
-            "Control which tabs are visible per role and per user. "
-            "Role settings apply to all users of that role. "
-            "User overrides take precedence. "
-            "The **Developer** role always sees all tabs."
-        )
+        if has_permission("tab_visibility"):
+          st.markdown("### Tab Visibility")
+          st.write(
+              "Control which tabs are visible per role and per user. "
+              "Role settings apply to all users of that role. "
+              "User overrides take precedence. "
+              "The **Developer** role always sees all tabs."
+          )
         st.caption("Tabs can only be hidden here — not granted beyond what the role's permissions allow.")
 
         _tv = load_tab_visibility()
@@ -3926,40 +3957,84 @@ if "settings" in tab_index:
                 st.write(f"- **{_proj}:** {_rd_str}")
 
         st.divider()
-        # Project access management — developer only
-        # (admin can see but not edit; developer can assign)
-        st.markdown("### Project Access")
-        st.write(
-            "Control which users can access each project. "
-            "If no users are selected for a project, **all users** can access it. "
-            "Select specific users to restrict access to only those users."
-        )
+        # Project Access — admins and developers can manage projects they have access to
+        if has_permission("manage_users"):
+            st.markdown("### Project Access")
+            st.write(
+                "Control which users can access each project. "
+                "If no users are selected, **all users** can access it. "
+                "You can only manage projects you have access to."
+            )
 
-        _access_proj_settings = load_project_settings()
-        _all_usernames = list(USERS.keys())
+            _access_proj_settings = load_project_settings()
+            _all_usernames = list(USERS.keys())
+            _username_cur  = st.session_state.get("username", "")
 
-        if not _all_named:
-            st.info("No named projects yet.")
-        else:
-            for _proj in _all_named:
-                with st.expander(f"📁  {_proj}", expanded=False):
-                    _current_allowed = _access_proj_settings.get(_proj, {}).get("allowed_users", [])
-                    _new_allowed = st.multiselect(
-                        "Allowed users (empty = all users)",
-                        options=_all_usernames,
-                        default=[u for u in _current_allowed if u in _all_usernames],
-                        format_func=lambda u: f"{u}  —  {USERS[u]['name']} · {ROLE_LABEL.get(USERS[u]['role'], USERS[u]['role'])}",
-                        key=f"access_{_proj}",
-                    )
-                    if st.button("💾  Save access", key=f"access_save_{_proj}",
-                                disabled=not has_permission("manage_users")):
-                        set_allowed_users(_proj, _new_allowed)
-                        if _new_allowed:
-                            st.success(
-                                f"Access restricted to: {', '.join(USERS[u]['name'] for u in _new_allowed)}"
+            # Only show projects this user has access to
+            _manageable_projs = [
+                p for p in _all_named
+                if user_can_access_project(_username_cur, p)
+            ]
+
+            if not _manageable_projs:
+                st.info("No projects available to manage.")
+            else:
+                for _proj in _manageable_projs:
+                    with st.expander(f"📁  {_proj}", expanded=False):
+                        _current_allowed = _access_proj_settings.get(_proj, {}).get("allowed_users", [])
+
+                        # Show auto-assigned users clearly
+                        if _current_allowed:
+                            st.caption(
+                                f"Currently restricted to: "
+                                f"{', '.join(USERS[u]['name'] if u in USERS else u for u in _current_allowed)}"
                             )
                         else:
-                            st.success("Access open to all users.")
+                            st.caption("Currently open to all users.")
+
+                        _new_allowed = st.multiselect(
+                            "Allowed users (empty = all users)",
+                            options=_all_usernames,
+                            default=[u for u in _current_allowed if u in _all_usernames],
+                            format_func=lambda u: (
+                                f"{u}  —  {USERS[u]['name']} · "
+                                f"{ROLE_LABEL.get(USERS[u]['role'], USERS[u]['role'])}"
+                                + (" (auto-assigned)" if u == _username_cur
+                                   and u in _current_allowed else "")
+                            ),
+                            key=f"access_{_proj}",
+                        )
+                        # Validate at least one manage_users user is in the selection
+                        _has_manager = any(
+                            has_permission.__func__ if hasattr(has_permission, '__func__') else
+                            (lambda u: "manage_users" in PERMISSIONS.get(
+                                USERS.get(u, {}).get("role",""), set()))(u)
+                            for u in _new_allowed
+                        ) if _new_allowed else True  # empty = all users, so managers included
+
+                        _has_manager = (not _new_allowed) or any(
+                            "manage_users" in PERMISSIONS.get(
+                                USERS.get(u, {}).get("role",""), set()
+                            )
+                            for u in _new_allowed
+                        )
+
+                        if _new_allowed and not _has_manager:
+                            st.error(
+                                "⚠️ The selection must include at least one user with "
+                                "project management permissions (Admin or Developer). "
+                                "Please add one before saving."
+                            )
+                        if st.button("💾  Save access", key=f"access_save_{_proj}",
+                                     disabled=(_new_allowed and not _has_manager)):
+                            set_allowed_users(_proj, _new_allowed)
+                            if _new_allowed:
+                                st.success(
+                                    f"Access restricted to: "
+                                    f"{', '.join(USERS[u]['name'] if u in USERS else u for u in _new_allowed)}"
+                                )
+                            else:
+                                st.success("Access open to all users.")
 
         st.divider()
         st.markdown("### Rename Project")
@@ -4373,7 +4448,7 @@ if "sitewalk" in tab_index:
             )
 
             # ── Gantt chart toggle ────────────────────────────────────────────
-            show_gantt = st.toggle("📊 Show Gantt Chart", value=False, key="sw_gantt_toggle")
+            show_gantt = st.toggle("📊 Show Gantt Chart", value=True, key="sw_gantt_toggle")
 
             if show_gantt and visible_acts:
                 # Collect bar data for each activity
@@ -4670,23 +4745,15 @@ if "sitewalk" in tab_index:
                     sw_pct = 0
                     sw_rem = 0
 
-                    if new_status == "Not Started" or new_status == "In Progress":
-                        st.info("% Complete set to 0 automatically.", icon="ℹ️")
-                        sw_rem = st.text_input(
-                            "Remaining Duration (days) *",
-                            value=str(merged.get("remaining_dur","") or ""),
-                            placeholder="e.g. 5",
-                            key=f"sw_rem_{aid}",
-                            ).strip()
                         
-                    elif new_status == "In Progress":
+                    if new_status == "In Progress":
                         sw_start_dt = datetime_inputs(
                             "Actual Start *", key=f"sw_start_{aid}", required=True,
                             default_dt=iso_to_dt(merged.get("actual_start","")),
                         )
-
+                        
                         # ── Input mode selector ───────────────────────────────
-                        _ip_mode = st.radio(
+                        _ip_mode_sw = st.radio(
                             "Update by",
                             ["% Complete", "Remaining Duration", "Expected Finish",
                              "Physical % Complete"],
@@ -4699,7 +4766,7 @@ if "sitewalk" in tab_index:
 
                         _rpt = _rpt_date_sw or _today
 
-                        if _ip_mode == "% Complete":
+                        if _ip_mode_sw == "% Complete":
                             sw_pct = st.number_input(
                                 "Duration % Complete *",
                                 min_value=0, max_value=99, step=5,
@@ -4717,7 +4784,7 @@ if "sitewalk" in tab_index:
                                     f"Expected finish: **{_ef_calc.strftime('%d/%m/%Y')}**"
                                 )
 
-                        elif _ip_mode == "Remaining Duration":
+                        elif _ip_mode_sw == "Remaining Duration":
                             sw_rem = st.text_input(
                                 "Remaining Duration (days) *",
                                 value=sw_rem,
@@ -4736,7 +4803,7 @@ if "sitewalk" in tab_index:
                                         f"Expected finish: **{_ef_calc.strftime('%d/%m/%Y')}**"
                                     )
 
-                        elif _ip_mode == "Expected Finish":
+                        elif _ip_mode_sw == "Expected Finish":
                             _cur_ef = _add_working_days(
                                 _rpt, int(float(sw_rem)) if sw_rem else 0
                             ) if sw_rem else _rpt
