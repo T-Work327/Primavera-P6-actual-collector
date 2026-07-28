@@ -4746,7 +4746,7 @@ if "sitewalk" in tab_index:
 
                     sw_start_dt = sw_finish_dt = None
                     sw_pct = 0
-                    sw_rem = 0
+                    sw_rem = str(act.get("remaining_dur","") or "")
 
                         
                     if new_status == "In Progress":
