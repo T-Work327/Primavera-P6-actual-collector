@@ -4025,8 +4025,11 @@ if "settings" in tab_index:
                                 "project management permissions (Admin or Developer). "
                                 "Please add one before saving."
                             )
+                            _disabled=True
+                        else:
+                            _disabled=False
                         if st.button("💾  Save access", key=f"access_save_{_proj}",
-                                     disabled=(_new_allowed and not _has_manager)):
+                                     disabled=(_disabled)):
                             set_allowed_users(_proj, _new_allowed)
                             if _new_allowed:
                                 st.success(
