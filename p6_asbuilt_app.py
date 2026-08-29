@@ -89,6 +89,8 @@ USERS = {
     "engineer2":  {"hash": _pw["engineer2_hash"],  "role": "engineer",  "name": "Site Engineer 2"},
     "viewer":     {"hash": _pw["viewer_hash"],     "role": "viewer",    "name": "Project Viewer"},
     "developer":  {"hash": _pw["developer_hash"],  "role": "developer", "name": "Developer"},
+    "egaeta": {"hash": _pw["egaeta_hash"], "role":"admin", "name":"egaeta"},
+    "chou": {"hash": _pw["chou_hash"], "role":"admin", "name":"chou"},
 }
 
 # ── Role Permission Matrix ─────────────────────────────────────────────────────
@@ -2954,6 +2956,7 @@ if "import" in tab_index:
                             skipped += 1
 
                     save_entries(entries)
+
                     msg = f"Import complete: **{added}** added"
                     if overwritten: msg += f", **{overwritten}** overwritten"
                     if skipped:     msg += f", **{skipped}** skipped"
@@ -3966,7 +3969,6 @@ if "settings" in tab_index:
                 "You can only manage projects you have access to."
             )
 
-            _access_proj_settings = load_project_settings()
             _all_usernames = list(USERS.keys())
             _username_cur  = st.session_state.get("username", "")
 
@@ -3981,8 +3983,7 @@ if "settings" in tab_index:
             else:
                 for _proj in _manageable_projs:
                     with st.expander(f"📁  {_proj}", expanded=False):
-                        _current_allowed = _access_proj_settings.get(_proj, {}).get("allowed_users", [])
-
+                        _current_allowed = get_allowed_users(_proj)
                         # Show auto-assigned users clearly
                         if _current_allowed:
                             st.caption(
@@ -3990,10 +3991,10 @@ if "settings" in tab_index:
                                 f"{', '.join(USERS[u]['name'] if u in USERS else u for u in _current_allowed)}"
                             )
                         else:
-                            st.caption("Currently open to all users.")
+                            st.caption("No users found")
 
                         _new_allowed = st.multiselect(
-                            "Allowed users (empty = all users)",
+                            "select users to give access",
                             options=_all_usernames,
                             default=[u for u in _current_allowed if u in _all_usernames],
                             format_func=lambda u: (
@@ -4743,11 +4744,13 @@ if "sitewalk" in tab_index:
                               if merged.get("activity_status") in STATUS_OPTIONS else 0,
                         key=f"sw_status_{aid}",
                     )
-
+                    
                     sw_start_dt = sw_finish_dt = None
                     sw_pct = 0
                     sw_rem = str(act.get("remaining_dur","") or "")
-
+                        
+                    if new_status == "Not started":
+                        sw_start_dt = date.today() #doesn't set expected start
                         
                     if new_status == "In Progress":
                         sw_start_dt = datetime_inputs(
