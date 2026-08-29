@@ -1,6 +1,6 @@
 {
   "AAM-Phase 4 Master Schedule 12-19-2 - B3": {
-    "report_date": "2026-05-14",
+    "report_date": "2026-07-28",
     "data_date": "2026-02-26",
     "allowed_users": [
       "engineer",
@@ -25,5 +25,22 @@
       "developer"
     ],
     "report_date": "2026-05-14"
+  },
+  "23-020 NPB 260303thI": {
+    "report_date": "2026-07-28",
+    "allowed_users": [
+      "admin"
+    ]
+  },
+  "HH Pharmacy-1223": {
+    "report_date": "2026-07-28",
+    "allowed_users": [
+      "chou"
+    ]
+  },
+  "HHCL-1223": {
+    "allowed_users": [
+      "egaeta"
+    ]
   }
 }
