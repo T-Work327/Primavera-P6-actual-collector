@@ -35,12 +35,14 @@
   "HH Pharmacy-1223": {
     "report_date": "2026-07-28",
     "allowed_users": [
-      "chou"
+      "chou",
+      "egaeta"
     ]
   },
   "HHCL-1223": {
     "allowed_users": [
-      "egaeta"
+      "egaeta",
+      "chou"
     ]
   }
 }
