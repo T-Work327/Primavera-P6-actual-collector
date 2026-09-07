@@ -40,9 +40,9 @@
       "egaeta"
     ],
     "project_roles": {
-      "chou": "admin",
+      "chou": "engineer",
       "developer": "developer",
-      "egaeta": "engineer"
+      "egaeta": "admin"
     }
   },
   "HHCL-1223": {
@@ -53,8 +53,8 @@
     ],
     "report_date": "2026-07-28",
     "project_roles": {
-      "egaeta": "admin",
-      "chou": "engineer",
+      "egaeta": "engineer",
+      "chou": "admin",
       "developer": "developer"
     }
   }
