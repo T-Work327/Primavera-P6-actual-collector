@@ -78,20 +78,37 @@ def _h(pw: str, rounds: int = 8) -> str:
 def _hcheck(pw: str, hsh: str) -> bool:
     return bcrypt.checkpw(pw.encode(), hsh.encode())
 
-# Load hashes from secrets
-_pw = st.secrets["passwords"]
+# Load users entirely from secrets.toml
+# Each user is defined under [users.username] with name, role, and a hash
+# under [passwords] as username_hash.
+#
+# secrets.toml format:
+#   [passwords]
+#   john_hash = "$2b$08$..."
+#
+#   [users.john]
+#   name = "John Smith"
+#   role = "engineer"
+
+_pw    = st.secrets["passwords"]
+_users = st.secrets.get("users", {})
 
 USERS = {
-    #  username        hash                          role          display name
-    "admin":      {"hash": _pw["admin_hash"],      "role": "admin",     "name": "Administrator"},
-    "admin2":     {"hash": _pw["admin2_hash"],     "role": "admin",     "name": "Administrator 2"},
-    "engineer":   {"hash": _pw["engineer_hash"],   "role": "engineer",  "name": "Site Engineer"},
-    "engineer2":  {"hash": _pw["engineer2_hash"],  "role": "engineer",  "name": "Site Engineer 2"},
-    "viewer":     {"hash": _pw["viewer_hash"],     "role": "viewer",    "name": "Project Viewer"},
-    "developer":  {"hash": _pw["developer_hash"],  "role": "developer", "name": "Developer"},
-    "egaeta": {"hash": _pw["egaeta_hash"], "role":"admin", "name":"egaeta"},
-    "chou": {"hash": _pw["chou_hash"], "role":"admin", "name":"chou"},
+    username: {
+        "name": info.get("name", username),
+        "role": info.get("role", "viewer"),
+        "hash": _pw.get(f"{username}_hash", ""),
+    }
+    for username, info in _users.items()
+    if _pw.get(f"{username}_hash")   # skip users with no hash defined
 }
+
+if not USERS:
+    st.error(
+        "No users found in secrets.toml. "
+        "Add [users.username] sections and matching [passwords] hashes."
+    )
+    st.stop()
 
 # ── Role Permission Matrix ─────────────────────────────────────────────────────
 # Each role name maps directly to a set of permission keys.
@@ -101,7 +118,7 @@ PERMISSIONS = {
     "viewer":    {"view"},
     "engineer":  {"view", "submit", "import", "photos", "sitewalk"},
     "admin":     {"view", "submit", "import", "export", "photos",
-                  "settings", "sitewalk", "manage_users"},
+                  "settings", "sitewalk",},
     "developer": {"view", "submit", "import", "export", "photos",
                   "settings", "sitewalk", "manage_users",
                   "tab_order", "tab_visibility"},
@@ -1069,17 +1086,43 @@ def auto_assign_new_projects(username: str,
                               before_projects: set[str],
                               after_entries: list[dict]) -> None:
     """
-    After saving entries, detect any newly created projects (present in
-    after_entries but not in before_projects) and automatically assign
-    the creating user to them.
-    Skips (Unassigned) and projects that already have explicit access rules.
+    After saving entries, detect newly created projects and automatically
+    assign the creating user as allowed user with admin project role.
+    Skips (Unassigned) and projects that already have access rules.
     """
     after_projects = set(get_all_projects(after_entries))
     new_projects   = after_projects - before_projects - {"(Unassigned)"}
     for proj in new_projects:
         existing = get_allowed_users(proj)
-        if not existing:   # no rules yet — set the creator as sole allowed user
+        if not existing:
             set_allowed_users(proj, [username])
+            # Give creator admin role on this project
+            set_project_roles(proj, {username: "admin"})
+
+def get_project_roles(project: str) -> dict:
+    """Return {username: role} for this project."""
+    return load_project_settings().get(project, {}).get("project_roles", {})
+
+def set_project_roles(project: str, roles: dict) -> None:
+    """Save {username: role} for this project."""
+    settings = load_project_settings()
+    settings.setdefault(project, {})["project_roles"] = roles
+    save_project_settings(settings)
+
+def get_effective_role(username: str, project: str) -> str:
+    """
+    Return the effective role for a user on a specific project.
+    Developer always returns 'developer'.
+    Otherwise look up project_roles, fall back to global role.
+    """
+    global_role = USERS.get(username, {}).get("role", "viewer")
+    if global_role == "developer":
+        return "developer"
+    if not project or project == "(Unassigned)":
+        return global_role
+    project_roles = get_project_roles(project)
+    return project_roles.get(username, global_role)
+
 
 def user_can_access_project(username: str, project: str) -> bool:
     """Return True if username is allowed to access project.
@@ -1531,7 +1574,8 @@ with st.sidebar:
     st.title("🏗️ P6 Asbuilt")
     st.divider()
     st.write(f"**{st.session_state.display_name}**")
-    st.caption(ROLE_LABEL.get(st.session_state.role, st.session_state.role))
+    _sidebar_role_lbl = ROLE_LABEL.get(st.session_state.role, st.session_state.role)
+    st.caption(_sidebar_role_lbl)
     if st.button("Log Out", width='stretch'):
         st.session_state.update({"authenticated": False, "username": "",
                                   "display_name": "", "role": ""})
@@ -1550,6 +1594,7 @@ with st.sidebar:
     if "selected_project" not in st.session_state or             st.session_state["selected_project"] not in _projects:
         st.session_state["selected_project"] = _projects[0] if _projects else ""
 
+    _prev_project = st.session_state.get("selected_project", "")
     st.session_state["selected_project"] = st.selectbox(
         "📁 Project",
         options=_projects if _projects else ["— No projects —"],
@@ -1558,6 +1603,15 @@ with st.sidebar:
         key="sidebar_project_select",
     )
     _sel_project = st.session_state["selected_project"]
+
+    # Resolve effective role for this project and rerun if project changed
+    _eff_role = get_effective_role(
+        st.session_state.get("username", ""), _sel_project
+    )
+    if _eff_role != st.session_state.get("role", ""):
+        st.session_state["role"] = _eff_role
+    if _sel_project != _prev_project:
+        st.rerun()
 
     # ── Report Date (per-project) ──────────────────────────────────────────
     if _sel_project and _sel_project != "— No projects —":
@@ -1610,6 +1664,21 @@ with st.sidebar:
                    "photo_to_aids", "aid_to_pids", "_assign_sig"):
             st.session_state.pop(_k, None)
         st.rerun()
+
+    # ── Desktop app download ───────────────────────────────────────────────
+    _EXE_PATH = Path("P6 Asbuilt.exe")
+    if _EXE_PATH.exists():
+        st.divider()
+        st.caption("💻 Desktop App")
+        with open(_EXE_PATH, "rb") as _exe_f:
+            st.download_button(
+                label="⬇️  Download Desktop App",
+                data=_exe_f,
+                file_name="P6 Asbuilt.exe",
+                mime="application/octet-stream",
+                use_container_width=True,
+                help="Download the desktop launcher — opens the app without a browser.",
+            )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HEADER & DYNAMIC TABS
@@ -2956,7 +3025,6 @@ if "import" in tab_index:
                             skipped += 1
 
                     save_entries(entries)
-
                     msg = f"Import complete: **{added}** added"
                     if overwritten: msg += f", **{overwritten}** overwritten"
                     if skipped:     msg += f", **{skipped}** skipped"
@@ -3969,11 +4037,18 @@ if "settings" in tab_index:
                 "You can only manage projects you have access to."
             )
 
+            # Reload fresh each render to pick up auto-assigns from recent imports
+            _access_proj_settings = load_project_settings()
             _all_usernames = list(USERS.keys())
             _username_cur  = st.session_state.get("username", "")
 
             # Only show projects this user has access to
-            _manageable_projs = [
+            
+            if st.session_state.get("role") == "developer":
+                _manageable_projs = _all_named
+            else:                
+            
+                _manageable_projs = [
                 p for p in _all_named
                 if user_can_access_project(_username_cur, p)
             ]
@@ -3983,7 +4058,12 @@ if "settings" in tab_index:
             else:
                 for _proj in _manageable_projs:
                     with st.expander(f"📁  {_proj}", expanded=False):
-                        _current_allowed = get_allowed_users(_proj)
+                        # Always use get_allowed_users() — ensures clean list of strings
+                        _current_allowed = [
+                            str(u) for u in get_allowed_users(_proj)
+                            if isinstance(u, str)
+                        ]
+
                         # Show auto-assigned users clearly
                         if _current_allowed:
                             st.caption(
@@ -3991,12 +4071,13 @@ if "settings" in tab_index:
                                 f"{', '.join(USERS[u]['name'] if u in USERS else u for u in _current_allowed)}"
                             )
                         else:
-                            st.caption("No users found")
+                            st.caption("Currently open to all users.")
 
+                        _valid_default = [u for u in _current_allowed if u in _all_usernames]
                         _new_allowed = st.multiselect(
-                            "select users to give access",
+                            "Allowed users (empty = all users)",
                             options=_all_usernames,
-                            default=[u for u in _current_allowed if u in _all_usernames],
+                            default=_valid_default,
                             format_func=lambda u: (
                                 f"{u}  —  {USERS[u]['name']} · "
                                 f"{ROLE_LABEL.get(USERS[u]['role'], USERS[u]['role'])}"
@@ -4005,37 +4086,54 @@ if "settings" in tab_index:
                             ),
                             key=f"access_{_proj}",
                         )
-                        # Validate at least one manage_users user is in the selection
-                        _has_manager = any(
-                            has_permission.__func__ if hasattr(has_permission, '__func__') else
-                            (lambda u: "manage_users" in PERMISSIONS.get(
-                                USERS.get(u, {}).get("role",""), set()))(u)
-                            for u in _new_allowed
-                        ) if _new_allowed else True  # empty = all users, so managers included
 
-                        _has_manager = (not _new_allowed) or any(
-                            "manage_users" in PERMISSIONS.get(
-                                USERS.get(u, {}).get("role",""), set()
+                        # ── Per-user project role assignment ──────────────────
+                        _cur_proj_roles = get_project_roles(_proj)
+                        _new_proj_roles = {}
+                        if _new_allowed:
+                            st.write("**Project roles:**")
+                            st.caption(
+                                "Set each user's role specifically for this project. "
+                                "Developer role always retains full access regardless."
                             )
+                            _role_options = ["viewer", "engineer", "admin"]
+                            for _u in _new_allowed:
+                                _global_role  = USERS.get(_u, {}).get("role", "viewer")
+                                if _global_role == "developer":
+                                    st.caption(f"  {_u} — Developer (always full access)")
+                                    _new_proj_roles[_u] = "developer"
+                                    continue
+                                _cur_proj_role = _cur_proj_roles.get(_u, _global_role)
+                                _proj_role_idx = _role_options.index(_cur_proj_role)                                     if _cur_proj_role in _role_options else 0
+                                _sel_role = st.selectbox(
+                                    f"Role for {USERS[_u]['name'] if _u in USERS else _u}",
+                                    options=_role_options,
+                                    index=_proj_role_idx,
+                                    format_func=lambda r: ROLE_LABEL.get(r, r),
+                                    key=f"proj_role_{_proj}_{_u}",
+                                )
+                                _new_proj_roles[_u] = _sel_role
+
+                        # Validate at least one manage_users user in selection
+                        _has_manager = (not _new_allowed) or any(
+                            "manage_users" in PERMISSIONS.get(_new_proj_roles.get(u,
+                                USERS.get(u, {}).get("role","viewer")), set())
                             for u in _new_allowed
                         )
 
                         if _new_allowed and not _has_manager:
                             st.error(
-                                "⚠️ The selection must include at least one user with "
-                                "project management permissions (Admin or Developer). "
-                                "Please add one before saving."
+                                "⚠️ At least one user must have Admin or Developer "
+                                "project role to maintain project access management."
                             )
-                            _disabled=True
-                        else:
-                            _disabled=False
                         if st.button("💾  Save access", key=f"access_save_{_proj}",
-                                     disabled=(_disabled)):
+                                     disabled=(_new_allowed and not _has_manager)):
                             set_allowed_users(_proj, _new_allowed)
+                            set_project_roles(_proj, _new_proj_roles)
                             if _new_allowed:
                                 st.success(
-                                    f"Access restricted to: "
-                                    f"{', '.join(USERS[u]['name'] if u in USERS else u for u in _new_allowed)}"
+                                    f"Access and roles saved for "
+                                    f"{len(_new_allowed)} user(s)."
                                 )
                             else:
                                 st.success("Access open to all users.")
@@ -4744,13 +4842,11 @@ if "sitewalk" in tab_index:
                               if merged.get("activity_status") in STATUS_OPTIONS else 0,
                         key=f"sw_status_{aid}",
                     )
-                    
+
                     sw_start_dt = sw_finish_dt = None
                     sw_pct = 0
-                    sw_rem = str(act.get("remaining_dur","") or "")
-                        
-                    if new_status == "Not started":
-                        sw_start_dt = date.today() #doesn't set expected start
+                    sw_rem = 0
+
                         
                     if new_status == "In Progress":
                         sw_start_dt = datetime_inputs(

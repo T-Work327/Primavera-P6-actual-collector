@@ -36,13 +36,26 @@
     "report_date": "2026-07-28",
     "allowed_users": [
       "chou",
+      "developer",
       "egaeta"
-    ]
+    ],
+    "project_roles": {
+      "chou": "admin",
+      "developer": "developer",
+      "egaeta": "engineer"
+    }
   },
   "HHCL-1223": {
     "allowed_users": [
       "egaeta",
-      "chou"
-    ]
+      "chou",
+      "developer"
+    ],
+    "report_date": "2026-07-28",
+    "project_roles": {
+      "egaeta": "admin",
+      "chou": "engineer",
+      "developer": "developer"
+    }
   }
 }
